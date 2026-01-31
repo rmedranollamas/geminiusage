@@ -127,10 +127,19 @@ def aggregate_usage():
     return stats
 
 
-def print_report(stats, show_models=False):
+def print_report(stats, show_models=False, today_only=False):
     if not stats:
         print("No usage data found.")
         return
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    if today_only:
+        if today_str not in stats:
+            print(f"No usage data found for today ({today_str}).")
+            return
+        # Create a filtered version of stats containing only today
+        stats = {today_str: stats[today_str]}
 
     # Header
     model_header = f"{'MODEL':<25} " if show_models else ""
@@ -143,7 +152,6 @@ def print_report(stats, show_models=False):
     grand_total_cost = 0.0
 
     # Sort by date
-    today_str = datetime.now().strftime("%Y-%m-%d")
     for date in sorted(stats.keys()):
         display_date = f"{date}*" if date == today_str else f"{date:<11} "
         if not show_models:
@@ -247,8 +255,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model", action="store_true", help="Show breakdown per model."
     )
+    parser.add_argument(
+        "--today", action="store_true", help="Only show usage for today."
+    )
     args = parser.parse_args()
 
     stats = aggregate_usage()
-    print_report(stats, show_models=args.model)
-    print_summary_statistics(stats)
+    print_report(stats, show_models=args.model, today_only=args.today)
+    if not args.today:
+        print_summary_statistics(stats)
