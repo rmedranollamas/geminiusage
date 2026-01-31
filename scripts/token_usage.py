@@ -127,12 +127,12 @@ def aggregate_usage():
     return stats
 
 
-def print_report(stats, show_models=False, today_only=False):
+def print_report(stats, show_models=False, today_only=False, raw=False):
     today_str = datetime.now().strftime("%Y-%m-%d")
 
     if today_only:
         if today_str not in stats:
-            # Initialize empty stats for today to ensure we print 0s instead of nothing
+            # Initialize empty stats for today
             stats = {
                 today_str: {
                     "unknown": {
@@ -148,7 +148,24 @@ def print_report(stats, show_models=False, today_only=False):
             stats = {today_str: stats[today_str]}
 
     if not stats:
-        print("No usage data found.")
+        if raw:
+            print("0")
+        else:
+            print("No usage data found.")
+        return
+
+    grand_total_tokens = 0
+    grand_total_cost = 0.0
+
+    # Aggregate totals first
+    for date in stats:
+        for model in stats[date]:
+            s = stats[date][model]
+            grand_total_tokens += s["input"] + s["cached"] + s["output"]
+            grand_total_cost += s["cost"]
+
+    if raw:
+        print(grand_total_tokens)
         return
 
     # Header
@@ -157,9 +174,6 @@ def print_report(stats, show_models=False, today_only=False):
     line_len = len(header) + 2
     print(header)
     print("-" * line_len)
-
-    grand_total_tokens = 0
-    grand_total_cost = 0.0
 
     # Sort by date
     for date in sorted(stats.keys()):
@@ -268,9 +282,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--today", action="store_true", help="Only show usage for today."
     )
+    parser.add_argument(
+        "--raw", action="store_true", help="Print only the raw total token count."
+    )
     args = parser.parse_args()
 
     stats = aggregate_usage()
-    print_report(stats, show_models=args.model, today_only=args.today)
-    if not args.today:
+    print_report(stats, show_models=args.model, today_only=args.today, raw=args.raw)
+    if not args.today and not args.raw:
         print_summary_statistics(stats)
