@@ -68,33 +68,38 @@ def calculate_cost(model, input_tokens, cached_tokens, output_tokens):
     ) / 1_000_000
 
 
-def aggregate_usage():
-    # Use real user home or resolve to the symlink
-    home = Path.home()
-    gemini_dir = home / ".gemini"
-    # If symlink doesn't exist or is invalid, fallback to the direct path
-    if not gemini_dir.exists():
-        gemini_dir = Path("/usr/local/google/home/niobium/Code/dotgemini")
+def aggregate_usage(base_dir=None):
+    if base_dir:
+        tmp_dir = Path(base_dir)
+    else:
+        # Use real user home
+        gemini_dir = Path.home() / ".gemini"
+        tmp_dir = gemini_dir / "tmp"
 
-    tmp_dir = gemini_dir / "tmp"
+    # stats[date][model] = {
+    #   sessions: set(), input: 0, cached: 0, output: 0, cost: 0.0
+    # }
+    def session_factory():
+        return {
+            "sessions": set(),
+            "input": 0,
+            "cached": 0,
+            "output": 0,
+            "cost": 0.0,
+        }
 
-    # stats[date][model] = {sessions: set(), input: 0, cached: 0, output: 0, cost: 0.0}
-    stats = defaultdict(
-        lambda: defaultdict(
-            lambda: {
-                "sessions": set(),
-                "input": 0,
-                "cached": 0,
-                "output": 0,
-                "cost": 0.0,
-            }
-        )
-    )
+    stats = defaultdict(lambda: defaultdict(session_factory))
 
-    for session_file in tmp_dir.glob("*/chats/session-*.json"):
+    if not tmp_dir.exists():
+        return stats
+
+    for session_file in tmp_dir.glob("**/session-*.json"):
         try:
             with session_file.open("r", encoding="utf-8") as f:
                 data = json.load(f)
+
+            if not isinstance(data, dict):
+                continue
 
             session_id = data.get("sessionId") or session_file.stem
             start_time = data.get("startTime", "")
@@ -111,7 +116,8 @@ def aggregate_usage():
                     cache = tokens.get("cached", 0)
                     out = tokens.get("output", 0) + tokens.get("thoughts", 0)
 
-                    # Calculate cost per message to handle tiered thresholds correctly
+                    # Calculate cost per message to handle tiered thresholds
+                    # correctly.
                     cost = calculate_cost(model, inp, cache, out)
 
                     m_stats = stats[date][model]
@@ -121,10 +127,65 @@ def aggregate_usage():
                     m_stats["output"] += out
                     m_stats["cost"] += cost
 
+        except (json.JSONDecodeError, IOError, KeyError):
+            continue
         except Exception:
+            # Catch-all for other unexpected issues but keep going
             continue
 
     return stats
+
+
+def get_date_range(filter_name, today=None):
+    """Returns (start_date, end_date) strings for a given filter."""
+    if today is None:
+        today = datetime.now().date()
+
+    if filter_name == "yesterday":
+        yesterday = today - timedelta(days=1)
+        return yesterday.strftime("%Y-%m-%d"), yesterday.strftime("%Y-%m-%d")
+
+    elif filter_name == "this-week":
+        # Monday is 0, Sunday is 6
+        start = today - timedelta(days=today.weekday())
+        return start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
+
+    elif filter_name == "last-week":
+        # Last Monday to last Sunday
+        end = today - timedelta(days=today.weekday() + 1)
+        start = end - timedelta(days=6)
+        return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+    elif filter_name == "this-month":
+        start = today.replace(day=1)
+        return start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
+
+    elif filter_name == "last-month":
+        # First day of this month
+        first_of_this_month = today.replace(day=1)
+        # Last day of last month
+        end = first_of_this_month - timedelta(days=1)
+        # First day of last month
+        start = end.replace(day=1)
+        return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+    elif ":" in filter_name:
+        parts = filter_name.split(":")
+        if len(parts) == 2:
+            return parts[0], parts[1]
+
+    return None, None
+
+
+def filter_stats(stats, start_date, end_date):
+    """Filters stats by date range (inclusive)."""
+    filtered = {}
+    for date, models in stats.items():
+        if date == "unknown":
+            continue
+        if start_date <= date <= end_date:
+            filtered[date] = models
+    return filtered
 
 
 def print_report(stats, show_models=False, today_only=False, raw=False):
@@ -156,21 +217,22 @@ def print_report(stats, show_models=False, today_only=False, raw=False):
 
     grand_total_tokens = 0
     grand_total_cost = 0.0
-
-    # Aggregate totals first
-    for date in stats:
-        for model in stats[date]:
-            s = stats[date][model]
-            grand_total_tokens += s["input"] + s["cached"] + s["output"]
-            grand_total_cost += s["cost"]
+    model_grand_totals = defaultdict(lambda: {"tokens": 0, "cost": 0.0})
 
     if raw:
+        for date in stats:
+            for model in stats[date]:
+                s = stats[date][model]
+                grand_total_tokens += s["input"] + s["cached"] + s["output"]
         print(grand_total_tokens)
         return
 
     # Header
     model_header = f"{'MODEL':<25} " if show_models else ""
-    header = f"{'DATE':<12} {model_header}{'SESS':<5} {'INPUT':>12} {'CACHED':>12} {'OUTPUT':>12} {'TOTAL':>12} {'COST':>10}"
+    header = (
+        f"{'DATE':<12} {model_header}{'SESS':<5} {'INPUT':>12} "
+        f"{'CACHED':>12} {'OUTPUT':>12} {'TOTAL':>12} {'COST':>10}"
+    )
     line_len = len(header) + 2
     print(header)
     print("-" * line_len)
@@ -208,25 +270,41 @@ def print_report(stats, show_models=False, today_only=False, raw=False):
                 total = s["input"] + s["cached"] + s["output"]
 
                 print(
-                    f"{display_date:<12} {model[:25]:<25} {len(s['sessions']):<5} "
-                    f"{s['input']:>12,} {s['cached']:>12,} {s['output']:>12,} "
+                    f"{display_date:<12} {model[:25]:<25} "
+                    f"{len(s['sessions']):<5} {s['input']:>12,} "
+                    f"{s['cached']:>12,} {s['output']:>12,} "
                     f"{total:>12,} ${s['cost']:>8.2f}"
                 )
 
                 grand_total_tokens += total
                 grand_total_cost += s["cost"]
+                model_grand_totals[model]["tokens"] += total
+                model_grand_totals[model]["cost"] += s["cost"]
 
     print("-" * line_len)
     if today_str in stats:
-        print("* Note: Today's count is not complete (there can be more done! :)")
-    total_label = "TOTALS"
+        msg = "* Note: Today's count is not complete (there can be more!)"
+        print(msg)
+    
+    if show_models and len(model_grand_totals) > 1:
+        for model in sorted(model_grand_totals.keys()):
+            m_stats = model_grand_totals[model]
+            label = f"TOTALS ({model[:20]})"
+            print(
+                f"{label:<44} {m_stats['tokens']:>50,} "
+                f"${m_stats['cost']:>8.2f}"
+            )
+        print("-" * line_len)
+
+    total_label = "TOTALS (ALL)" if show_models else "TOTALS"
     offset = 44 if show_models else 18
     print(
-        f"{total_label:<{offset}} {grand_total_tokens:>50,} ${grand_total_cost:>8.2f}"
+        f"{total_label:<{offset}} {grand_total_tokens:>50,} "
+        f"${grand_total_cost:>8.2f}"
     )
 
 
-def print_summary_statistics(stats):
+def print_summary_statistics(stats, show_models=False):
     if not stats:
         return
 
@@ -243,12 +321,17 @@ def print_summary_statistics(stats):
 
     # Total tokens per day (aggregated across models)
     daily_totals = defaultdict(int)
+    model_totals = defaultdict(lambda: {"total": 0, "days": set()})
+
     for date, models in stats.items():
         if date == "unknown":
             continue
         d_obj = datetime.strptime(date, "%Y-%m-%d").date()
         for model, s in models.items():
-            daily_totals[d_obj] += s["input"] + s["cached"] + s["output"]
+            tokens = s["input"] + s["cached"] + s["output"]
+            daily_totals[d_obj] += tokens
+            model_totals[model]["total"] += tokens
+            model_totals[model]["days"].add(d_obj)
 
     total_days = len(daily_totals)
     grand_total = sum(daily_totals.values())
@@ -271,6 +354,17 @@ def print_summary_statistics(stats):
     print(f"{'Last 30 days total:':<25} {last_30_total:>15,}")
     print(f"{'Last 30 days average:':<25} {int(last_30_total / 30):>15,}")
 
+    if show_models and model_totals:
+        print("\nSUMMARY BY MODEL")
+        print("-" * 30)
+        for model in sorted(model_totals.keys()):
+            m_data = model_totals[model]
+            days_active = len(m_data["days"])
+            m_avg = m_data["total"] / days_active if days_active else 0
+            print(f"{model[:25]:<25}")
+            print(f"  {'Total tokens:':<23} {m_data['total']:>15,}")
+            print(f"  {'Avg per active day:':<23} {int(m_avg):>15,}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -280,14 +374,76 @@ if __name__ == "__main__":
         "--model", action="store_true", help="Show breakdown per model."
     )
     parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Print only the raw total token count.",
+    )
+
+    date_group = parser.add_mutually_exclusive_group()
+    date_group.add_argument(
         "--today", action="store_true", help="Only show usage for today."
     )
-    parser.add_argument(
-        "--raw", action="store_true", help="Print only the raw total token count."
+    date_group.add_argument(
+        "--yesterday",
+        action="store_true",
+        help="Only show usage for yesterday.",
     )
+    date_group.add_argument(
+        "--this-week",
+        action="store_true",
+        help="Usage for this week (from Monday).",
+    )
+    date_group.add_argument(
+        "--last-week",
+        action="store_true",
+        help="Usage for last week (Mon-Sun).",
+    )
+    date_group.add_argument(
+        "--this-month", action="store_true", help="Usage for this month."
+    )
+    date_group.add_argument(
+        "--last-month", action="store_true", help="Usage for last month."
+    )
+    date_group.add_argument(
+        "--date-range",
+        help="Usage for a specific range (YYYY-MM-DD:YYYY-MM-DD).",
+    )
+
     args = parser.parse_args()
 
     stats = aggregate_usage()
-    print_report(stats, show_models=args.model, today_only=args.today, raw=args.raw)
-    if not args.today and not args.raw:
-        print_summary_statistics(stats)
+
+    if args.today:
+        print_report(
+            stats, show_models=args.model, today_only=True, raw=args.raw
+        )
+    else:
+        start_date, end_date = None, None
+        if args.yesterday:
+            start_date, end_date = get_date_range("yesterday")
+        elif args.this_week:
+            start_date, end_date = get_date_range("this-week")
+        elif args.last_week:
+            start_date, end_date = get_date_range("last-week")
+        elif args.this_month:
+            start_date, end_date = get_date_range("this-month")
+        elif args.last_month:
+            start_date, end_date = get_date_range("last-month")
+        elif args.date_range:
+            start_date, end_date = get_date_range(args.date_range)
+
+        if start_date and end_date:
+            stats = filter_stats(stats, start_date, end_date)
+            print_report(
+                stats, show_models=args.model, today_only=False, raw=args.raw
+            )
+        else:
+            print_report(
+                stats, show_models=args.model, today_only=False, raw=args.raw
+            )
+
+    if not args.today and not args.raw and not any([
+        args.yesterday, args.this_week, args.last_week,
+        args.this_month, args.last_month, args.date_range
+    ]):
+        print_summary_statistics(stats, show_models=args.model)
