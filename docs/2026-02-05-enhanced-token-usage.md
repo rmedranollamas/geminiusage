@@ -112,3 +112,26 @@
 **Step 2: Verification**
 - Run a full manual test if possible (or mock all components).
 - Final check on `argparse` descriptions.
+
+---
+
+### Task 5: Refine Reporting Format & Add Costs to Summaries
+
+**Files:**
+- Modify: `/usr/local/google/home/rkj/misc/geminiusage/scripts/token_usage.py`
+- Modify: `/usr/local/google/home/rkj/misc/geminiusage/scripts/token-usage_test.py`
+
+**Step 1: Audit & Analysis**
+- Current truncation: `label = f"TOTALS ({model[:20]})"`. Remove truncation.
+- `print_summary_statistics` currently only prints token counts. Needs to track and print `cost` as well.
+
+**Step 2: RED (Test First)**
+- Update `test_print_report_with_models` to check for full model name in totals.
+- Update `test_print_summary_statistics_with_models` to check for cost strings.
+
+**Step 3: GREEN (Implementation)**
+- Remove `[:20]` truncation in `print_report`.
+- Update `print_summary_statistics` to aggregate and display costs for all time, last 7 days, last 30 days, and per model.
+
+**Step 4: Verification (Standard Workflow)**
+- Test: `python3 scripts/token-usage_test.py`

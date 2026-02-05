@@ -190,19 +190,19 @@ class TestReporting(unittest.TestCase):
     def setUp(self):
         self.stats = {
             "2026-02-01": {
-                "gemini-3-flash": {
+                "gemini-3-flash-long-model-name-testing": {
                     "sessions": {"s1"},
                     "input": 1000000,
                     "cached": 0,
                     "output": 500000,
-                    "cost": 0.5 + 1.5, # 2.0
+                    "cost": 2.0,
                 },
                 "gemini-3-pro": {
                     "sessions": {"s2"},
                     "input": 1000000,
                     "cached": 0,
                     "output": 500000,
-                    "cost": 2.0 + 6.0, # 8.0
+                    "cost": 8.0,
                 }
             }
         }
@@ -217,8 +217,10 @@ class TestReporting(unittest.TestCase):
             sys.stdout = old_stdout
         output = captured_output.getvalue()
         
-        self.assertIn("gemini-3-flash", output)
+        self.assertIn("gemini-3-flash-long-model-name-testing", output)
         self.assertIn("gemini-3-pro", output)
+        # Check for non-truncated name in TOTALS section
+        self.assertIn("TOTALS (gemini-3-flash-long-model-name-testing)", output)
         # Total tokens: 1.5M + 1.5M = 3.0M
         self.assertIn("3,000,000", output)
         # Total cost: 2.0 + 8.0 = 10.0
@@ -229,15 +231,17 @@ class TestReporting(unittest.TestCase):
         old_stdout = sys.stdout
         sys.stdout = captured_output
         try:
-            # This is expected to fail or need update
             tu.print_summary_statistics(self.stats, show_models=True)
         finally:
             sys.stdout = old_stdout
         output = captured_output.getvalue()
         
         self.assertIn("SUMMARY BY MODEL", output)
-        self.assertIn("gemini-3-flash", output)
-        self.assertIn("gemini-3-pro", output)
+        self.assertIn("gemini-3-flash-long-model-name-testing", output)
+        self.assertIn("Total cost:", output)
+        self.assertIn("$          2.00", output)
+        self.assertIn("Avg cost / day:", output)
+        self.assertIn("Total tokens:", output)
 
 
 if __name__ == "__main__":

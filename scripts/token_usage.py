@@ -270,7 +270,7 @@ def print_report(stats, show_models=False, today_only=False, raw=False):
                 total = s["input"] + s["cached"] + s["output"]
 
                 print(
-                    f"{display_date:<12} {model[:25]:<25} "
+                    f"{display_date:<12} {model:<25} "
                     f"{len(s['sessions']):<5} {s['input']:>12,} "
                     f"{s['cached']:>12,} {s['output']:>12,} "
                     f"{total:>12,} ${s['cost']:>8.2f}"
@@ -289,7 +289,7 @@ def print_report(stats, show_models=False, today_only=False, raw=False):
     if show_models and len(model_grand_totals) > 1:
         for model in sorted(model_grand_totals.keys()):
             m_stats = model_grand_totals[model]
-            label = f"TOTALS ({model[:20]})"
+            label = f"TOTALS ({model})"
             print(
                 f"{label:<44} {m_stats['tokens']:>50,} "
                 f"${m_stats['cost']:>8.2f}"
@@ -319,9 +319,13 @@ def print_summary_statistics(stats, show_models=False):
     if not all_dates:
         return
 
-    # Total tokens per day (aggregated across models)
-    daily_totals = defaultdict(int)
-    model_totals = defaultdict(lambda: {"total": 0, "days": set()})
+    # Aggregate by day
+    daily_token_totals = defaultdict(int)
+    daily_cost_totals = defaultdict(float)
+    # Aggregate by model
+    model_totals = defaultdict(
+        lambda: {"tokens": 0, "cost": 0.0, "days": set()}
+    )
 
     for date, models in stats.items():
         if date == "unknown":
@@ -329,30 +333,52 @@ def print_summary_statistics(stats, show_models=False):
         d_obj = datetime.strptime(date, "%Y-%m-%d").date()
         for model, s in models.items():
             tokens = s["input"] + s["cached"] + s["output"]
-            daily_totals[d_obj] += tokens
-            model_totals[model]["total"] += tokens
+            cost = s["cost"]
+            
+            daily_token_totals[d_obj] += tokens
+            daily_cost_totals[d_obj] += cost
+            
+            model_totals[model]["tokens"] += tokens
+            model_totals[model]["cost"] += cost
             model_totals[model]["days"].add(d_obj)
 
-    total_days = len(daily_totals)
-    grand_total = sum(daily_totals.values())
-    avg_per_day = grand_total / total_days if total_days > 0 else 0
+    total_days = len(daily_token_totals)
+    grand_total_tokens = sum(daily_token_totals.values())
+    grand_total_cost = sum(daily_cost_totals.values())
+    
+    avg_tokens_per_day = (
+        grand_total_tokens / total_days if total_days > 0 else 0
+    )
+    avg_cost_per_day = grand_total_cost / total_days if total_days > 0 else 0
 
     # Last N days calculations
     def get_period_stats(days):
         cutoff = today - timedelta(days=days)
-        period_data = [v for k, v in daily_totals.items() if k >= cutoff]
-        return sum(period_data), len(period_data)
+        period_tokens = [
+            v for k, v in daily_token_totals.items() if k >= cutoff
+        ]
+        period_costs = [v for k, v in daily_cost_totals.items() if k >= cutoff]
+        return sum(period_tokens), sum(period_costs)
 
-    last_7_total, last_7_days_count = get_period_stats(7)
-    last_30_total, last_30_days_count = get_period_stats(30)
+    last_7_tokens, last_7_cost = get_period_stats(7)
+    last_30_tokens, last_30_cost = get_period_stats(30)
 
     print("\nSUMMARY STATISTICS")
     print("-" * 30)
-    print(f"{'Average tokens / day:':<25} {int(avg_per_day):>15,}")
-    print(f"{'Last 7 days total:':<25} {last_7_total:>15,}")
-    print(f"{'Last 7 days average:':<25} {int(last_7_total / 7):>15,}")
-    print(f"{'Last 30 days total:':<25} {last_30_total:>15,}")
-    print(f"{'Last 30 days average:':<25} {int(last_30_total / 30):>15,}")
+    print(f"{'Total tokens:':<25} {grand_total_tokens:>15,}")
+    print(f"{'Total cost:':<25} ${grand_total_cost:>14.2f}")
+    print(f"{'Average tokens / day:':<25} {int(avg_tokens_per_day):>15,}")
+    print(f"{'Average cost / day:':<25} ${avg_cost_per_day:>14.2f}")
+    print()
+    print(f"{'Last 7 days tokens:':<25} {last_7_tokens:>15,}")
+    print(f"{'Last 7 days cost:':<25} ${last_7_cost:>14.2f}")
+    print(f"{'Last 7 days avg tokens:':<25} {int(last_7_tokens / 7):>15,}")
+    print(f"{'Last 7 days avg cost:':<25} ${last_7_cost / 7:>14.2f}")
+    print()
+    print(f"{'Last 30 days tokens:':<25} {last_30_tokens:>15,}")
+    print(f"{'Last 30 days cost:':<25} ${last_30_cost:>14.2f}")
+    print(f"{'Last 30 days avg tokens:':<25} {int(last_30_tokens / 30):>15,}")
+    print(f"{'Last 30 days avg cost:':<25} ${last_30_cost / 30:>14.2f}")
 
     if show_models and model_totals:
         print("\nSUMMARY BY MODEL")
@@ -360,10 +386,18 @@ def print_summary_statistics(stats, show_models=False):
         for model in sorted(model_totals.keys()):
             m_data = model_totals[model]
             days_active = len(m_data["days"])
-            m_avg = m_data["total"] / days_active if days_active else 0
-            print(f"{model[:25]:<25}")
-            print(f"  {'Total tokens:':<23} {m_data['total']:>15,}")
-            print(f"  {'Avg per active day:':<23} {int(m_avg):>15,}")
+            m_avg_tokens = (
+                m_data["tokens"] / days_active if days_active else 0
+            )
+            m_avg_cost = m_data["cost"] / days_active if days_active else 0
+            
+            print(f"{model:<25}")
+            print(f"  {'Total tokens:':<23} {m_data['tokens']:>15,}")
+            print(f"  {'Total cost:':<23} ${m_data['cost']:>14.2f}")
+            print(
+                f"  {'Avg tokens / day:':<23} {int(m_avg_tokens):>15,}"
+            )
+            print(f"  {'Avg cost / day:':<23} ${m_avg_cost:>14.2f}")
 
 
 if __name__ == "__main__":
