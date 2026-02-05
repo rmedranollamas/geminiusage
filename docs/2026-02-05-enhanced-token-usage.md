@@ -135,3 +135,25 @@
 
 **Step 4: Verification (Standard Workflow)**
 - Test: `python3 scripts/token-usage_test.py`
+
+---
+
+### Task 6: Tabular Summary Statistics & Per-Model Summary
+
+**Files:**
+- Modify: `/usr/local/google/home/rkj/misc/geminiusage/scripts/token_usage.py`
+- Modify: `/usr/local/google/home/rkj/misc/geminiusage/scripts/token-usage_test.py`
+
+**Step 1: Audit & Analysis**
+- Refactor `print_summary_statistics` to use a table-like layout for the general stats.
+- Convert the "SUMMARY BY MODEL" section into a proper table with columns for Model, Days Active, Total Tokens, Avg Tokens/Day, Total Cost, and Avg Cost/Day.
+
+**Step 2: RED (Test First)**
+- Update `test_print_summary_statistics_with_models` to expect headers like "TOTAL TOKENS" and "TOTAL COST" in the summary sections.
+
+**Step 3: GREEN (Implementation)**
+- Implement the tabular layout in `print_summary_statistics`.
+- Ensure column alignment is consistent.
+
+**Step 4: Verification (Standard Workflow)**
+- Test: `python3 scripts/token-usage_test.py`

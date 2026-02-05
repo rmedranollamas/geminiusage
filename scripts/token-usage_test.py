@@ -237,11 +237,37 @@ class TestReporting(unittest.TestCase):
         output = captured_output.getvalue()
         
         self.assertIn("SUMMARY BY MODEL", output)
+        # The name might be truncated if it is too long, but we should at least see a good part of it.
+        # After my fix to increase width to 40, it should be fully there.
         self.assertIn("gemini-3-flash-long-model-name-testing", output)
-        self.assertIn("Total cost:", output)
-        self.assertIn("$          2.00", output)
-        self.assertIn("Avg cost / day:", output)
-        self.assertIn("Total tokens:", output)
+        self.assertIn("TOTAL TOKENS", output)
+        self.assertIn("TOTAL COST", output)
+        self.assertIn("1,500,000", output)
+        self.assertIn("$      2.00", output)
+        self.assertIn("$      8.00", output)
+
+    def test_print_summary_statistics_tabular(self):
+        captured_output = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = captured_output
+        try:
+            tu.print_summary_statistics(self.stats, show_models=True)
+        finally:
+            sys.stdout = old_stdout
+        output = captured_output.getvalue()
+        
+        # Check general summary table headers
+        self.assertIn("PERIOD", output)
+        self.assertIn("TOKENS", output)
+        self.assertIn("COST", output)
+        
+        # Check model summary table headers
+        self.assertIn("MODEL", output)
+        self.assertIn("DAYS", output)
+        self.assertIn("TOTAL TOKENS", output)
+        self.assertIn("AVG TOKENS/D", output)
+        self.assertIn("TOTAL COST", output)
+        self.assertIn("AVG COST/D", output)
 
 
 if __name__ == "__main__":
