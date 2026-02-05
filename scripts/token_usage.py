@@ -289,7 +289,7 @@ def print_report(stats, show_models=False, today_only=False, raw=False):
     if show_models and len(model_grand_totals) > 1:
         for model in sorted(model_grand_totals.keys()):
             m_stats = model_grand_totals[model]
-            label = f"TOTALS ({model})"
+            label = f"TOTALS ({model[:33]})"
             print(
                 f"{label:<44} {m_stats['tokens']:>50,} "
                 f"${m_stats['cost']:>8.2f}"
