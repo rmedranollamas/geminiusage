@@ -270,7 +270,7 @@ def print_report(stats, show_models=False, today_only=False, raw=False):
                 total = s["input"] + s["cached"] + s["output"]
 
                 print(
-                    f"{display_date:<12} {model:<25} "
+                    f"{display_date:<12} {model[:25]:<25} "
                     f"{len(s['sessions']):<5} {s['input']:>12,} "
                     f"{s['cached']:>12,} {s['output']:>12,} "
                     f"{total:>12,} ${s['cost']:>8.2f}"
