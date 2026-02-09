@@ -56,6 +56,8 @@ class TestUsageTUI(unittest.TestCase):
         mock_newpad.assert_called()
         self.assertFalse(self.tui.running)
 
+    @patch("curses.KEY_DOWN", 258)
+    @patch("curses.KEY_ENTER", 10)
     def test_filter_cycling(self) -> None:
         """Verifies keyboard handling for filter changes."""
         mock_stdscr = MagicMock()
@@ -63,19 +65,18 @@ class TestUsageTUI(unittest.TestCase):
         # Open filter menu
         self.tui.handle_input(ord('f'), mock_stdscr)
         self.assertTrue(self.tui.show_filter_menu)
+        self.assertEqual(self.tui.menu_selected, 0)  # Starts at 'all'
         
-        # Navigate and Select 'today' (idx 1)
-        self.tui.handle_input(258, mock_stdscr) # curses.KEY_DOWN (approx)
-        # Note: handle_input uses curses constants, so we should mock or use them
-        with patch("curses.KEY_DOWN", 258), patch("tui.curses.KEY_ENTER", 10):
-             self.tui.handle_input(258, mock_stdscr)
-             self.tui.handle_input(10, mock_stdscr)
+        # Navigate down to 'today' (idx 1)
+        import curses
+        self.tui.handle_input(curses.KEY_DOWN, mock_stdscr)
+        self.assertEqual(self.tui.menu_selected, 1)
+
+        # Select it
+        self.tui.handle_input(curses.KEY_ENTER, mock_stdscr)
              
         self.assertFalse(self.tui.show_filter_menu)
-        # If we pressed down twice starting from all (0), we should be at yesterday (2)?
-        # Actually filter_options = [all, today, yesterday, ...]
-        # Let's just check if it changed
-        self.assertNotEqual(self.tui.current_filter, "all")
+        self.assertEqual(self.tui.current_filter, "today")
 
     @patch("token_usage.get_date_range")
     @patch("token_usage.filter_stats")

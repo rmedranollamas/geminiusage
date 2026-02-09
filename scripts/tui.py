@@ -165,19 +165,29 @@ class UsageTUI:
         
         label_col_width = self.col_widths[0] + 2 + self.col_widths[1] if self.show_models else self.col_widths[0]
         
+        # Robust column indexing based on total number of columns
         def format_total_line(label: str, stats: Dict[str, Any]) -> str:
+            num_cols = len(self.col_widths)
+            # Input, Cached, Output, Total, Cost are the last 5 columns
+            cost_idx = num_cols - 1
+            total_idx = num_cols - 2
+            out_idx = num_cols - 3
+            cached_idx = num_cols - 4
+            input_idx = num_cols - 5
+
             parts = [f"{label:<{label_col_width}}"]
             if self.show_models:
+                # Skip Model column (idx 1) and Sessions column (idx 2)
                 parts.append(f"{'':>{self.col_widths[2]}}") 
             
             t_in, t_ca, t_out = stats["input"], stats["cached"], stats["output"]
-            parts.append(f"{t_in:>{self.col_widths[-5]},}")
-            parts.append(f"{t_ca:>{self.col_widths[-4]},}")
-            parts.append(f"{t_out:>{self.col_widths[-3]},}")
-            parts.append(f"{(t_in + t_ca + t_out):>{self.col_widths[-2]},}")
+            parts.append(f"{t_in:>{self.col_widths[input_idx]},}")
+            parts.append(f"{t_ca:>{self.col_widths[cached_idx]},}")
+            parts.append(f"{t_out:>{self.col_widths[out_idx]},}")
+            parts.append(f"{(t_in + t_ca + t_out):>{self.col_widths[total_idx]},}")
             
             cost_str = f"${stats['cost']:,.2f}"
-            parts.append(f"{cost_str:>{self.col_widths[-1]}}")
+            parts.append(f"{cost_str:>{self.col_widths[cost_idx]}}")
             return "  ".join(parts)
 
         row_idx = 1

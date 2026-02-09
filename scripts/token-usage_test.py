@@ -54,6 +54,7 @@ class TestTokenUsage(unittest.TestCase):
             model_stats = stats["2026-01-20"]["gemini-3-flash"]
             self.assertEqual(model_stats.input_tokens, 100)
             self.assertEqual(model_stats.output_tokens, 30)  # 20 + 10
+            self.assertEqual(model_stats.cached_tokens, 50)
 
             # Verify cache file was created
             cache_file = tmp_path / "usage_cache.json"
@@ -62,6 +63,7 @@ class TestTokenUsage(unittest.TestCase):
             # Second run: should use cache
             stats_cached = token_usage.aggregate_usage(base_dir=tmp_path)
             self.assertEqual(stats_cached["2026-01-20"]["gemini-3-flash"].input_tokens, 100)
+            self.assertEqual(stats_cached["2026-01-20"]["gemini-3-flash"].cached_tokens, 50)
 
     def test_aggregation_robustness(self) -> None:
         """Verifies that aggregation handles malformed or null-valued JSON fields."""
@@ -129,19 +131,20 @@ class TestDateFiltering(unittest.TestCase):
     def test_get_date_range_named(self) -> None:
         """Tests standard named ranges like 'yesterday' or 'this-week'."""
         today_obj = date(2026, 2, 5)  # Thursday
-        
-        # Yesterday
-        start, end = token_usage.get_date_range("yesterday", today_obj=today_obj)
-        self.assertEqual(start, "2026-02-04")
 
-        # This Week (starts Monday)
-        start, _ = token_usage.get_date_range("this-week", today_obj=today_obj)
-        self.assertEqual(start, "2026-02-02")
+        test_cases = {
+            "yesterday": ("2026-02-04", "2026-02-04"),
+            "this-week": ("2026-02-02", "2026-02-05"),
+            "last-week": ("2026-01-26", "2026-02-01"),
+            "this-month": ("2026-02-01", "2026-02-05"),
+            "last-month": ("2026-01-01", "2026-01-31"),
+        }
 
-        # Last Month
-        start, end = token_usage.get_date_range("last-month", today_obj=today_obj)
-        self.assertEqual(start, "2026-01-01")
-        self.assertEqual(end, "2026-01-31")
+        for name, (expected_start, expected_end) in test_cases.items():
+            with self.subTest(range=name):
+                start, end = token_usage.get_date_range(name, today_obj=today_obj)
+                self.assertEqual(start, expected_start)
+                self.assertEqual(end, expected_end)
 
     def test_filter_stats_logic(self) -> None:
         """Tests the actual filtering of aggregated stats dict."""

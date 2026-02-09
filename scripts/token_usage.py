@@ -227,8 +227,13 @@ def aggregate_usage(
         try:
             with cache_file.open("w", encoding="utf-8") as f:
                 json.dump(updated_cache, f)
-        except (IOError, TypeError):
+        except IOError:
             pass
+        except TypeError as e:
+            # TypeError usually means something non-serializable got into the cache dict
+            # We don't want to crash the whole tool, but we shouldn't silently ignore it during dev
+            import sys
+            print(f"Error: Failed to serialize cache: {e}", file=sys.stderr)
 
     return stats
 
