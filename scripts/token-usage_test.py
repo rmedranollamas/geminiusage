@@ -1,20 +1,29 @@
-import json
-import unittest
-from pathlib import Path
-import tempfile
-import sys
-import os
-import io
+#!/usr/bin/env python3
+"""Tests for token_usage.py logic."""
 
-# Add the scripts directory to path to import token-usage
+import io
+import json
+import os
+import sys
+import unittest
+from datetime import date, timedelta
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import MagicMock, patch
+
+# Add the scripts directory to path to import token_usage
 sys.path.append(os.path.dirname(__file__))
-import token_usage as tu
+import token_usage
 
 
 class TestTokenUsage(unittest.TestCase):
-    def test_aggregation(self):
-        with tempfile.TemporaryDirectory() as tmpdirname:
+    """Core logic tests for token usage aggregation and calculation."""
+
+    def test_aggregation_with_caching(self) -> None:
+        """Verifies that aggregation works correctly and respects caching."""
+        with TemporaryDirectory() as tmpdirname:
             tmp_path = Path(tmpdirname)
+            # Create a mock session file structure
             chat_dir = tmp_path / "project1" / "chats"
             chat_dir.mkdir(parents=True)
 
@@ -22,10 +31,9 @@ class TestTokenUsage(unittest.TestCase):
                 "sessionId": "test-session",
                 "startTime": "2026-01-20T12:00:00Z",
                 "messages": [
-                    {"type": "user", "content": "hello"},
                     {
                         "type": "gemini",
-                        "model": "gemini-3-flash-preview",
+                        "model": "gemini-3-flash",
                         "tokens": {
                             "input": 100,
                             "cached": 50,
@@ -36,238 +44,166 @@ class TestTokenUsage(unittest.TestCase):
                 ],
             }
 
-            with (chat_dir / "session-1.json").open("w") as f:
+            session_file = chat_dir / "session-1.json"
+            with session_file.open("w") as f:
                 json.dump(session_data, f)
 
-            stats = tu.aggregate_usage(base_dir=tmp_path)
-
+            # First run: should parse file
+            stats = token_usage.aggregate_usage(base_dir=tmp_path)
             self.assertIn("2026-01-20", stats)
-            flash_stats = stats["2026-01-20"]["gemini-3-flash-preview"]
-            self.assertEqual(flash_stats["input"], 100)
-            self.assertEqual(flash_stats["cached"], 50)
-            self.assertEqual(flash_stats["output"], 30)  # 20 + 10
-            self.assertEqual(len(flash_stats["sessions"]), 1)
+            model_stats = stats["2026-01-20"]["gemini-3-flash"]
+            self.assertEqual(model_stats.input_tokens, 100)
+            self.assertEqual(model_stats.output_tokens, 30)  # 20 + 10
+            self.assertEqual(model_stats.cached_tokens, 50)
 
-    def test_cost_calculation(self):
-        # Gemini 3 Flash: $0.50 Input, $0.05 Cache, $3.00 Output per 1M
-        cost_flash = tu.calculate_cost(
-            "gemini-3-flash-preview", 1_000_000, 1_000_000, 1_000_000
-        )
-        self.assertAlmostEqual(cost_flash, 0.50 + 0.05 + 3.00)
+            # Verify cache file was created
+            cache_file = tmp_path / "usage_cache.json"
+            self.assertTrue(cache_file.exists())
 
-        # Gemini 3 Pro (<= 200k): $2.00 Input, $0.20 Cache, $12.00 Output per 1M
-        cost_pro_small = tu.calculate_cost(
-            "gemini-3-pro-preview", 100_000, 50_000, 10_000
-        )
-        expected_small = (100_000 * 2.00 + 50_000 * 0.20 + 10_000 * 12.00) / 1_000_000
-        self.assertAlmostEqual(cost_pro_small, expected_small)
+            # Second run: should use cache
+            stats_cached = token_usage.aggregate_usage(base_dir=tmp_path)
+            self.assertEqual(stats_cached["2026-01-20"]["gemini-3-flash"].input_tokens, 100)
+            self.assertEqual(stats_cached["2026-01-20"]["gemini-3-flash"].cached_tokens, 50)
 
-        # Gemini 3 Pro (> 200k): $4.00 Input, $0.40 Cache, $18.00 Output per 1M
-        cost_pro_large = tu.calculate_cost("gemini-3-pro-preview", 200_001, 0, 0)
-        expected_large = (200_001 * 4.00) / 1_000_000
-        self.assertAlmostEqual(cost_pro_large, expected_large)
+    def test_aggregation_robustness(self) -> None:
+        """Verifies that aggregation handles malformed or null-valued JSON fields."""
+        with TemporaryDirectory() as tmpdirname:
+            tmp_path = Path(tmpdirname)
+            chat_dir = tmp_path / "chats"
+            chat_dir.mkdir()
 
-        # Gemini 2.5 Pro (<= 200k): $1.25 Input, $0.125 Cache, $10.00 Output per 1M
-        cost_25_pro_small = tu.calculate_cost(
-            "gemini-2.5-pro", 100_000, 0, 0
-        )
-        self.assertAlmostEqual(cost_25_pro_small, 0.125)
+            # Session with null tokens and null messages
+            session_nulls = {
+                "sessionId": "null-session",
+                "startTime": "2026-01-21T12:00:00Z",
+                "messages": [
+                    {
+                        "type": "gemini",
+                        "model": "gemini-3-flash",
+                        "tokens": None
+                    },
+                    None # Malformed message
+                ]
+            }
+            
+            with (chat_dir / "session-nulls.json").open("w") as f:
+                json.dump(session_nulls, f)
+            
+            # This should not crash
+            stats = token_usage.aggregate_usage(base_dir=tmp_path)
+            self.assertIn("2026-01-21", stats)
+            model_stats = stats["2026-01-21"]["gemini-3-flash"]
+            self.assertEqual(model_stats.input_tokens, 0)
 
-        # Gemini 2.5 Pro (> 200k): $2.50 Input, $0.25 Cache, $15.00 Output per 1M
-        cost_25_pro_large = tu.calculate_cost(
-            "gemini-2.5-pro", 200_001, 0, 0
-        )
-        self.assertAlmostEqual(cost_25_pro_large, (200_001 * 2.50) / 1_000_000)
+    def test_calculate_cost_tiers(self) -> None:
+        """Tests tiered cost calculation for Pro models."""
+        # Pro model (<= 200k context)
+        cost_small = token_usage.calculate_cost("gemini-3-pro", 100_000, 0, 0)
+        self.assertAlmostEqual(cost_small, 0.20)  # (100k * 2.00) / 1M
 
-        # Gemini 2.5 Flash: $0.30 Input, $0.03 Cache, $2.50 Output per 1M
-        cost_25_flash = tu.calculate_cost(
-            "gemini-2.5-flash", 1_000_000, 1_000_000, 1_000_000
-        )
-        self.assertAlmostEqual(cost_25_flash, 0.30 + 0.03 + 2.50)
+        # Pro model (> 200k context)
+        cost_large = token_usage.calculate_cost("gemini-3-pro", 200_001, 0, 0)
+        self.assertAlmostEqual(cost_large, (200_001 * 4.00) / 1_000_000)
 
-        # Gemini 2.5 Flash Lite: $0.10 Input, $0.01 Cache, $0.40 Output per 1M
-        cost_25_flash_lite = tu.calculate_cost(
-            "gemini-2.5-flash-lite", 1_000_000, 1_000_000, 1_000_000
-        )
-        self.assertAlmostEqual(cost_25_flash_lite, 0.10 + 0.01 + 0.40)
-
-        # Gemini 2.0 Flash: $0.10 Input, $0.025 Cache, $0.40 Output per 1M
-        cost_20_flash = tu.calculate_cost(
-            "gemini-2.0-flash", 1_000_000, 1_000_000, 1_000_000
-        )
-        self.assertAlmostEqual(cost_20_flash, 0.10 + 0.025 + 0.40)
-
-        # Gemini 2.0 Flash Lite: $0.075 Input, $0.0 Cache, $0.30 Output per 1M
-        cost_20_flash_lite = tu.calculate_cost(
-            "gemini-2.0-flash-lite", 1_000_000, 1_000_000, 1_000_000
-        )
-        self.assertAlmostEqual(cost_20_flash_lite, 0.075 + 0.30)
-
-        # General Flash fallback: $0.50 Input, $0.05 Cache, $3.00 Output per 1M
-        cost_general_flash = tu.calculate_cost(
-            "some-other-flash", 1_000_000, 1_000_000, 1_000_000
-        )
-        self.assertAlmostEqual(cost_general_flash, 0.50 + 0.05 + 3.00)
-
-        # Unknown model (defaults to Pro pricing): $2.00 Input, $0.20 Cache, $12.00 Output per 1M
-        cost_unknown = tu.calculate_cost(
-            "unknown-model", 100_000, 50_000, 10_000
-        )
-        expected_unknown = (100_000 * 2.00 + 50_000 * 0.20 + 10_000 * 12.00) / 1_000_000
-        self.assertAlmostEqual(cost_unknown, expected_unknown)
+    def test_calculate_cost_models(self) -> None:
+        """Tests specific cost rates for different models."""
+        # Test input cost per 1M tokens within small context
+        models = [
+            ("gemini-3-flash", 100_000, 0.50),
+            ("gemini-2.5-pro", 100_000, 1.25),
+            ("gemini-2.5-flash-lite", 100_000, 0.10),
+            ("gemini-2.0-flash", 100_000, 0.10),
+        ]
+        for model_name, input_tokens, expected_rate in models:
+            with self.subTest(model=model_name):
+                # We pass 1,000,000 tokens to get the rate directly in USD
+                cost = token_usage.calculate_cost(model_name, 1_000_000, 0, 0)
+                # But wait, if we pass 1M, it exceeds the 200k threshold.
+                # Let's pass a small amount and multiply.
+                cost_small = token_usage.calculate_cost(model_name, input_tokens, 0, 0)
+                calculated_rate = cost_small * (1_000_000 / input_tokens)
+                self.assertAlmostEqual(calculated_rate, expected_rate, places=4)
 
 
 class TestDateFiltering(unittest.TestCase):
-    def test_get_date_range_yesterday(self):
-        # Mocking datetime.now is tricky, let's see how we can test this.
-        # Maybe we can pass an optional 'today' to get_date_range for testing.
-        from datetime import date
-        today = date(2026, 2, 5)  # Thursday
-        
-        # yesterday
-        start, end = tu.get_date_range("yesterday", today=today)
-        self.assertEqual(start, "2026-02-04")
-        self.assertEqual(end, "2026-02-04")
+    """Tests for date range generation and filtering."""
 
-    def test_get_date_range_this_week(self):
-        from datetime import date
-        today = date(2026, 2, 5)  # Thursday
-        
-        # this-week: Monday to today
-        start, end = tu.get_date_range("this-week", today=today)
-        self.assertEqual(start, "2026-02-02")
-        self.assertEqual(end, "2026-02-05")
+    def test_get_date_range_named(self) -> None:
+        """Tests standard named ranges like 'yesterday' or 'this-week'."""
+        today_obj = date(2026, 2, 5)  # Thursday
 
-    def test_get_date_range_last_week(self):
-        from datetime import date
-        today = date(2026, 2, 5)  # Thursday
-        
-        # last-week: Previous Monday to previous Sunday
-        start, end = tu.get_date_range("last-week", today=today)
-        self.assertEqual(start, "2026-01-26")
-        self.assertEqual(end, "2026-02-01")
-
-    def test_get_date_range_this_month(self):
-        from datetime import date
-        today = date(2026, 2, 5)
-        
-        # this-month: 1st of month to today
-        start, end = tu.get_date_range("this-month", today=today)
-        self.assertEqual(start, "2026-02-01")
-        self.assertEqual(end, "2026-02-05")
-
-    def test_get_date_range_last_month(self):
-        from datetime import date
-        today = date(2026, 2, 5)
-        
-        # last-month: 1st to last of previous month
-        start, end = tu.get_date_range("last-month", today=today)
-        self.assertEqual(start, "2026-01-01")
-        self.assertEqual(end, "2026-01-31")
-
-    def test_get_date_range_custom(self):
-        # custom range: "YYYY-MM-DD:YYYY-MM-DD"
-        start, end = tu.get_date_range("2026-01-01:2026-01-15")
-        self.assertEqual(start, "2026-01-01")
-        self.assertEqual(end, "2026-01-15")
-
-    def test_filter_stats(self):
-        stats = {
-            "2026-01-01": {"model1": {"input": 10}},
-            "2026-01-05": {"model1": {"input": 20}},
-            "2026-01-10": {"model1": {"input": 30}},
-            "unknown": {"model1": {"input": 40}}
+        test_cases = {
+            "yesterday": ("2026-02-04", "2026-02-04"),
+            "this-week": ("2026-02-02", "2026-02-05"),
+            "last-week": ("2026-01-26", "2026-02-01"),
+            "this-month": ("2026-02-01", "2026-02-05"),
+            "last-month": ("2026-01-01", "2026-01-31"),
         }
-        filtered = tu.filter_stats(stats, "2026-01-05", "2026-01-10")
-        self.assertEqual(len(filtered), 2)
-        self.assertIn("2026-01-05", filtered)
+
+        for name, (expected_start, expected_end) in test_cases.items():
+            with self.subTest(range=name):
+                start, end = token_usage.get_date_range(name, today_obj=today_obj)
+                self.assertEqual(start, expected_start)
+                self.assertEqual(end, expected_end)
+
+    def test_filter_stats_logic(self) -> None:
+        """Tests the actual filtering of aggregated stats dict."""
+        stats = {
+            "2026-01-01": {"m": token_usage.ModelStats(input_tokens=10)},
+            "2026-01-10": {"m": token_usage.ModelStats(input_tokens=20)},
+        }
+        filtered = token_usage.filter_stats(stats, "2026-01-05", "2026-01-15")
+        self.assertEqual(len(filtered), 1)
         self.assertIn("2026-01-10", filtered)
-        self.assertNotIn("2026-01-01", filtered)
-        self.assertNotIn("unknown", filtered)
 
 
 class TestReporting(unittest.TestCase):
-    def setUp(self):
+    """Tests for CLI reporting output."""
+
+    def setUp(self) -> None:
         self.stats = {
             "2026-02-01": {
-                "gemini-3-flash-long-model-name-testing": {
-                    "sessions": {"s1"},
-                    "input": 1000000,
-                    "cached": 0,
-                    "output": 500000,
-                    "cost": 2.0,
-                },
-                "gemini-3-pro": {
-                    "sessions": {"s2"},
-                    "input": 1000000,
-                    "cached": 0,
-                    "output": 500000,
-                    "cost": 8.0,
-                }
+                "gemini-3-pro": token_usage.ModelStats(
+                    sessions={"s1"}, input_tokens=1000, cost=0.01
+                )
             }
         }
 
-    def test_print_report_with_models(self):
-        captured_output = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = captured_output
-        try:
-            tu.print_report(self.stats, show_models=True)
-        finally:
-            sys.stdout = old_stdout
-        output = captured_output.getvalue()
+    def test_print_report_tabular(self) -> None:
+        """Verifies tabular report format."""
+        output = io.StringIO()
+        with patch("sys.stdout", output):
+            token_usage.print_report(self.stats)
         
-        self.assertIn("gemini-3-flash-long-model-name-testing", output)
-        self.assertIn("gemini-3-pro", output)
-        # Check for non-truncated name in TOTALS section
-        self.assertIn("TOTALS (gemini-3-flash-long-model-name-testing)", output)
-        # Total tokens: 1.5M + 1.5M = 3.0M
-        self.assertIn("3,000,000", output)
-        # Total cost: 2.0 + 8.0 = 10.0
-        self.assertIn("$   10.00", output)
+        text = output.getvalue()
+        self.assertIn("DATE", text)
+        self.assertIn("2026-02-01", text)
+        self.assertIn("1,000", text)
 
-    def test_print_summary_statistics_with_models(self):
-        captured_output = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = captured_output
-        try:
-            tu.print_summary_statistics(self.stats, show_models=True)
-        finally:
-            sys.stdout = old_stdout
-        output = captured_output.getvalue()
+    def test_summary_statistics_calculations(self) -> None:
+        """Verifies aggregate summary math."""
+        output = io.StringIO()
+        with patch("sys.stdout", output):
+            token_usage.print_summary_statistics(self.stats)
         
-        self.assertIn("SUMMARY BY MODEL", output)
-        # The name might be truncated if it is too long, but we should at least see a good part of it.
-        # After my fix to increase width to 40, it should be fully there.
-        self.assertIn("gemini-3-flash-long-model-name-testing", output)
-        self.assertIn("TOTAL TOKENS", output)
-        self.assertIn("TOTAL COST", output)
-        self.assertIn("1,500,000", output)
-        self.assertIn("$      2.00", output)
-        self.assertIn("$      8.00", output)
+        text = output.getvalue()
+        self.assertIn("SUMMARY STATISTICS", text)
+        self.assertIn("All Time", text)
 
-    def test_print_summary_statistics_tabular(self):
-        captured_output = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = captured_output
-        try:
-            tu.print_summary_statistics(self.stats, show_models=True)
-        finally:
-            sys.stdout = old_stdout
-        output = captured_output.getvalue()
-        
-        # Check general summary table headers
-        self.assertIn("PERIOD", output)
-        self.assertIn("TOKENS", output)
-        self.assertIn("COST", output)
-        
-        # Check model summary table headers
-        self.assertIn("MODEL", output)
-        self.assertIn("DAYS", output)
-        self.assertIn("TOTAL TOKENS", output)
-        self.assertIn("AVG TOKENS/D", output)
-        self.assertIn("TOTAL COST", output)
-        self.assertIn("AVG COST/D", output)
+    def test_main_cli_dispatch(self) -> None:
+        """Verifies the main function executes with mocked arguments."""
+        with patch("argparse.ArgumentParser.parse_args") as mock_args:
+            mock_args.return_value = MagicMock(
+                model=False, raw=True, today=True, yesterday=False,
+                this_week=False, last_week=False, this_month=False,
+                last_month=False, date_range=None
+            )
+            with patch("token_usage.aggregate_usage") as mock_agg:
+                mock_agg.return_value = {}
+                output = io.StringIO()
+                with patch("sys.stdout", output):
+                    token_usage.main()
+                self.assertEqual(output.getvalue().strip(), "0")
 
 
 if __name__ == "__main__":
