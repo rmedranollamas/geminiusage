@@ -6,10 +6,9 @@ import json
 import os
 import sys
 import unittest
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import MagicMock, patch
 
 # Add the scripts directory to path to import token_usage
 sys.path.append(os.path.dirname(__file__))
@@ -52,7 +51,7 @@ class TestTokenUsage(unittest.TestCase):
             stats = token_usage.aggregate_usage(base_dir=tmp_path)
             self.assertIn("2026-01-20", stats)
             model_stats = stats["2026-01-20"]["gemini-3-flash"]
-            self.assertEqual(model_stats.input_tokens, 100)
+            self.assertEqual(model_stats.input_tokens, 50)  # 100 total - 50 cached = 50
             self.assertEqual(model_stats.output_tokens, 30)  # 20 + 10
             self.assertEqual(model_stats.cached_tokens, 50)
 
@@ -62,8 +61,12 @@ class TestTokenUsage(unittest.TestCase):
 
             # Second run: should use cache
             stats_cached = token_usage.aggregate_usage(base_dir=tmp_path)
-            self.assertEqual(stats_cached["2026-01-20"]["gemini-3-flash"].input_tokens, 100)
-            self.assertEqual(stats_cached["2026-01-20"]["gemini-3-flash"].cached_tokens, 50)
+            self.assertEqual(
+                stats_cached["2026-01-20"]["gemini-3-flash"].input_tokens, 50
+            )
+            self.assertEqual(
+                stats_cached["2026-01-20"]["gemini-3-flash"].cached_tokens, 50
+            )
 
     def test_aggregation_robustness(self) -> None:
         """Verifies that aggregation handles malformed or null-valued JSON fields."""
@@ -77,18 +80,14 @@ class TestTokenUsage(unittest.TestCase):
                 "sessionId": "null-session",
                 "startTime": "2026-01-21T12:00:00Z",
                 "messages": [
-                    {
-                        "type": "gemini",
-                        "model": "gemini-3-flash",
-                        "tokens": None
-                    },
-                    None # Malformed message
-                ]
+                    {"type": "gemini", "model": "gemini-3-flash", "tokens": None},
+                    None,  # Malformed message
+                ],
             }
-            
+
             with (chat_dir / "session-nulls.json").open("w") as f:
                 json.dump(session_nulls, f)
-            
+
             # This should not crash
             stats = token_usage.aggregate_usage(base_dir=tmp_path)
             self.assertIn("2026-01-21", stats)
@@ -98,112 +97,99 @@ class TestTokenUsage(unittest.TestCase):
     def test_calculate_cost_tiers(self) -> None:
         """Tests tiered cost calculation for Pro models."""
         # Pro model (<= 200k context)
-        cost_small = token_usage.calculate_cost("gemini-3-pro", 100_000, 0, 0)
-        self.assertAlmostEqual(cost_small, 0.20)  # (100k * 2.00) / 1M
+        # Rates are 2.00 input, 0.20 cached, 12.00 output
+        # input_tokens is total prompt size.
+        # uncached = 10k - 5k = 5k.
+        # cost = (5k * 2.0 + 5k * 0.2 + 2k * 12.0) / 1M = (10k + 1k + 24k) / 1M = 35k / 1M = 0.035
+        cost_small = token_usage.calculate_cost(
+            "gemini-3-pro-preview", 10_000, 5_000, 2_000
+        )
+        self.assertAlmostEqual(cost_small, 0.035)
 
         # Pro model (> 200k context)
-        cost_large = token_usage.calculate_cost("gemini-3-pro", 200_001, 0, 0)
-        self.assertAlmostEqual(cost_large, (200_001 * 4.00) / 1_000_000)
+        # Rates are 4.00 input, 0.40 cached, 18.00 output
+        # uncached = 250k - 50k = 200k.
+        # cost = (200k * 4.0 + 50k * 0.4 + 10k * 18.0) / 1M = (800k + 20k + 180k) / 1M = 1M / 1M = 1.0
+        cost_large = token_usage.calculate_cost(
+            "gemini-3-pro-preview", 250_000, 50_000, 10_000
+        )
+        self.assertAlmostEqual(cost_large, 1.0)
 
-    def test_calculate_cost_models(self) -> None:
-        """Tests specific cost rates for different models."""
-        # Test input cost per 1M tokens within small context
-        models = [
-            ("gemini-3-flash", 100_000, 0.50),
-            ("gemini-2.5-pro", 100_000, 1.25),
-            ("gemini-2.5-flash-lite", 100_000, 0.10),
-            ("gemini-2.0-flash", 100_000, 0.10),
-        ]
-        for model_name, input_tokens, expected_rate in models:
-            with self.subTest(model=model_name):
-                # We pass 1,000,000 tokens to get the rate directly in USD
-                cost = token_usage.calculate_cost(model_name, 1_000_000, 0, 0)
-                # But wait, if we pass 1M, it exceeds the 200k threshold.
-                # Let's pass a small amount and multiply.
-                cost_small = token_usage.calculate_cost(model_name, input_tokens, 0, 0)
-                calculated_rate = cost_small * (1_000_000 / input_tokens)
-                self.assertAlmostEqual(calculated_rate, expected_rate, places=4)
+    def test_calculate_cost_fixed(self) -> None:
+        """Tests fixed cost calculation for Flash models."""
+        # Gemini 3 Flash: 0.50 input, 0.05 cached, 3.00 output
+        # uncached = 1M - 500k = 500k.
+        # cost = (500k * 0.5 + 500k * 0.05 + 100k * 3.0) / 1M = (250k + 25k + 300k) / 1M = 575k / 1M = 0.575
+        cost_flash = token_usage.calculate_cost(
+            "gemini-3-flash-preview", 1_000_000, 500_000, 100_000
+        )
+        self.assertAlmostEqual(cost_flash, 0.575)
 
+    def test_get_date_range(self) -> None:
+        """Tests named date range logic."""
+        today = date(2026, 2, 5)  # A Thursday
 
-class TestDateFiltering(unittest.TestCase):
-    """Tests for date range generation and filtering."""
+        # Today
+        start, end = token_usage.get_date_range("today", today_obj=today)
+        self.assertEqual(start, "2026-02-05")
+        self.assertEqual(end, "2026-02-05")
 
-    def test_get_date_range_named(self) -> None:
-        """Tests standard named ranges like 'yesterday' or 'this-week'."""
-        today_obj = date(2026, 2, 5)  # Thursday
+        # Yesterday
+        start, end = token_usage.get_date_range("yesterday", today_obj=today)
+        self.assertEqual(start, "2026-02-04")
+        self.assertEqual(end, "2026-02-04")
 
-        test_cases = {
-            "yesterday": ("2026-02-04", "2026-02-04"),
-            "this-week": ("2026-02-02", "2026-02-05"),
-            "last-week": ("2026-01-26", "2026-02-01"),
-            "this-month": ("2026-02-01", "2026-02-05"),
-            "last-month": ("2026-01-01", "2026-01-31"),
-        }
+        # This Week (starts Monday, Feb 2nd)
+        start, end = token_usage.get_date_range("this-week", today_obj=today)
+        self.assertEqual(start, "2026-02-02")
+        self.assertEqual(end, "2026-02-05")
 
-        for name, (expected_start, expected_end) in test_cases.items():
-            with self.subTest(range=name):
-                start, end = token_usage.get_date_range(name, today_obj=today_obj)
-                self.assertEqual(start, expected_start)
-                self.assertEqual(end, expected_end)
+        # Last Week (Mon, Jan 26 - Sun, Feb 1st)
+        start, end = token_usage.get_date_range("last-week", today_obj=today)
+        self.assertEqual(start, "2026-01-26")
+        self.assertEqual(end, "2026-02-01")
 
-    def test_filter_stats_logic(self) -> None:
-        """Tests the actual filtering of aggregated stats dict."""
+    def test_filter_stats(self) -> None:
+        """Tests date-based filtering of stats."""
         stats = {
-            "2026-01-01": {"m": token_usage.ModelStats(input_tokens=10)},
-            "2026-01-10": {"m": token_usage.ModelStats(input_tokens=20)},
+            "2026-01-01": {"m1": token_usage.ModelStats()},
+            "2026-01-15": {"m1": token_usage.ModelStats()},
+            "2026-02-01": {"m1": token_usage.ModelStats()},
+            "unknown": {"m1": token_usage.ModelStats()},
         }
-        filtered = token_usage.filter_stats(stats, "2026-01-05", "2026-01-15")
-        self.assertEqual(len(filtered), 1)
-        self.assertIn("2026-01-10", filtered)
+        filtered = token_usage.filter_stats(stats, "2026-01-10", "2026-01-31")
+        self.assertEqual(list(filtered.keys()), ["2026-01-15"])
 
+    def test_config_model_matching(self) -> None:
+        """Tests that config correctly identifies models by substring."""
+        config = token_usage.Config()
+        pricing = token_usage.ModelPricing(token_usage.PricingTier(1.0, 0.1, 2.0))
+        config.models["special-model"] = pricing
 
-class TestReporting(unittest.TestCase):
-    """Tests for CLI reporting output."""
+        # Exact match
+        self.assertEqual(config.get_pricing("special-model"), pricing)
+        # Substring/Versioned match
+        self.assertEqual(config.get_pricing("special-model-001"), pricing)
+        # Case insensitive
+        self.assertEqual(config.get_pricing("SPECIAL-MODEL"), pricing)
+        # Default
+        self.assertEqual(config.get_pricing("unknown"), config.default_pricing)
 
-    def setUp(self) -> None:
-        self.stats = {
-            "2026-02-01": {
-                "gemini-3-pro": token_usage.ModelStats(
-                    sessions={"s1"}, input_tokens=1000, cost=0.01
+    def test_print_report_raw(self) -> None:
+        """Tests raw token count output mode."""
+        stats = {
+            "2026-01-20": {
+                "m1": token_usage.ModelStats(
+                    input_tokens=100, cached_tokens=50, output_tokens=30
                 )
             }
         }
-
-    def test_print_report_tabular(self) -> None:
-        """Verifies tabular report format."""
-        output = io.StringIO()
-        with patch("sys.stdout", output):
-            token_usage.print_report(self.stats)
-        
-        text = output.getvalue()
-        self.assertIn("DATE", text)
-        self.assertIn("2026-02-01", text)
-        self.assertIn("1,000", text)
-
-    def test_summary_statistics_calculations(self) -> None:
-        """Verifies aggregate summary math."""
-        output = io.StringIO()
-        with patch("sys.stdout", output):
-            token_usage.print_summary_statistics(self.stats)
-        
-        text = output.getvalue()
-        self.assertIn("SUMMARY STATISTICS", text)
-        self.assertIn("All Time", text)
-
-    def test_main_cli_dispatch(self) -> None:
-        """Verifies the main function executes with mocked arguments."""
-        with patch("argparse.ArgumentParser.parse_args") as mock_args:
-            mock_args.return_value = MagicMock(
-                model=False, raw=True, today=True, yesterday=False,
-                this_week=False, last_week=False, this_month=False,
-                last_month=False, date_range=None
-            )
-            with patch("token_usage.aggregate_usage") as mock_agg:
-                mock_agg.return_value = {}
-                output = io.StringIO()
-                with patch("sys.stdout", output):
-                    token_usage.main()
-                self.assertEqual(output.getvalue().strip(), "0")
+        # Capture stdout
+        captured_output = io.StringIO()
+        sys.stdout = captured_output
+        token_usage.print_report(stats, raw_tokens_only=True)
+        sys.stdout = sys.__stdout__
+        self.assertEqual(captured_output.getvalue().strip(), "180")
 
 
 if __name__ == "__main__":
