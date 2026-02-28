@@ -6,3 +6,7 @@ __pycache__/
 # Local configurations
 pricing.json
 usage_report.txt
+
+# Agents
+.gemini
+
