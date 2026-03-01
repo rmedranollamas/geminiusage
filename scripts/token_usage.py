@@ -20,6 +20,19 @@ class ModelStats:
     output_tokens: int = 0
     cost: float = 0.0
 
+    @property
+    def total_tokens(self) -> int:
+        """Returns total tokens (input + cached + output)."""
+        return self.input_tokens + self.cached_tokens + self.output_tokens
+
+    def add(self, other: "ModelStats") -> None:
+        """Adds another ModelStats object to this one."""
+        self.sessions.update(other.sessions)
+        self.input_tokens += other.input_tokens
+        self.cached_tokens += other.cached_tokens
+        self.output_tokens += other.output_tokens
+        self.cost += other.cost
+
 
 @dataclass
 class PricingTier:
@@ -390,18 +403,14 @@ def print_report(
             print("No usage data found.")
         return
 
-    grand_total_tokens = 0
-    grand_total_cost = 0.0
-    model_grand_totals: Dict[str, Dict[str, Any]] = defaultdict(
-        lambda: {"tokens": 0, "cost": 0.0}
-    )
+    grand_total = ModelStats()
+    model_grand_totals: Dict[str, ModelStats] = defaultdict(ModelStats)
 
     if raw_tokens_only:
-        for date_str in stats:
-            for model_name in stats[date_str]:
-                s = stats[date_str][model_name]
-                grand_total_tokens += s.input_tokens + s.cached_tokens + s.output_tokens
-        print(grand_total_tokens)
+        for date_stats in stats.values():
+            for s in date_stats.values():
+                grand_total.add(s)
+        print(grand_total.total_tokens)
         return
 
     # Header configuration
@@ -418,39 +427,29 @@ def print_report(
     for date_str in sorted(stats.keys()):
         display_date = f"{date_str}*" if date_str == today_str else f"{date_str:<11} "
         if not show_models:
-            day_input = sum(s.input_tokens for s in stats[date_str].values())
-            day_cached = sum(s.cached_tokens for s in stats[date_str].values())
-            day_output = sum(s.output_tokens for s in stats[date_str].values())
-            day_sessions: Set[str] = set()
+            day_stats = ModelStats()
             for s in stats[date_str].values():
-                day_sessions.update(s.sessions)
-            day_cost = sum(s.cost for s in stats[date_str].values())
+                day_stats.add(s)
 
-            total = day_input + day_cached + day_output
             print(
-                f"{display_date:<12} {len(day_sessions):<5} "
-                f"{day_input:>12,} {day_cached:>12,} {day_output:>12,} "
-                f"{total:>12,} ${day_cost:>8.2f}"
+                f"{display_date:<12} {len(day_stats.sessions):<5} "
+                f"{day_stats.input_tokens:>12,} {day_stats.cached_tokens:>12,} {day_stats.output_tokens:>12,} "
+                f"{day_stats.total_tokens:>12,} ${day_stats.cost:>8.2f}"
             )
 
-            grand_total_tokens += total
-            grand_total_cost += day_cost
+            grand_total.add(day_stats)
         else:
             for model_name in sorted(stats[date_str].keys()):
                 s = stats[date_str][model_name]
-                total = s.input_tokens + s.cached_tokens + s.output_tokens
-
                 print(
                     f"{display_date:<12} {model_name[:40]:<40} "
                     f"{len(s.sessions):<5} {s.input_tokens:>12,} "
                     f"{s.cached_tokens:>12,} {s.output_tokens:>12,} "
-                    f"{total:>12,} ${s.cost:>8.2f}"
+                    f"{s.total_tokens:>12,} ${s.cost:>8.2f}"
                 )
 
-                grand_total_tokens += total
-                grand_total_cost += s.cost
-                model_grand_totals[model_name]["tokens"] += total
-                model_grand_totals[model_name]["cost"] += s.cost
+                grand_total.add(s)
+                model_grand_totals[model_name].add(s)
 
     print("-" * line_len)
     if today_str in stats:
@@ -460,13 +459,13 @@ def print_report(
         for model_name in sorted(model_grand_totals.keys()):
             m_stats = model_grand_totals[model_name]
             label = f"TOTALS ({model_name[:40]})"
-            print(f"{label:<59} {m_stats['tokens']:>50,} ${m_stats['cost']:>8.2f}")
+            print(f"{label:<59} {m_stats.total_tokens:>50,} ${m_stats.cost:>8.2f}")
         print("-" * line_len)
 
     total_label = "TOTALS (ALL)" if show_models else "TOTALS"
     offset = 59 if show_models else 18
     print(
-        f"{total_label:<{offset}} {grand_total_tokens:>50,} ${grand_total_cost:>8.2f}"
+        f"{total_label:<{offset}} {grand_total.total_tokens:>50,} ${grand_total.cost:>8.2f}"
     )
 
 
@@ -479,11 +478,9 @@ def print_summary_statistics(
 
     today_obj = datetime.now().date()
     # Aggregate daily totals
-    daily_token_totals: Dict[date, int] = defaultdict(int)
-    daily_cost_totals: Dict[date, float] = defaultdict(float)
-    model_totals: Dict[str, Dict[str, Any]] = defaultdict(
-        lambda: {"tokens": 0, "cost": 0.0, "days": set()}
-    )
+    daily_totals: Dict[date, ModelStats] = defaultdict(ModelStats)
+    model_totals: Dict[str, ModelStats] = defaultdict(ModelStats)
+    model_days: Dict[str, Set[date]] = defaultdict(set)
 
     for date_str, models in stats.items():
         if date_str == "unknown":
@@ -494,22 +491,16 @@ def print_summary_statistics(
             continue
 
         for model_name, s in models.items():
-            tokens = s.input_tokens + s.cached_tokens + s.output_tokens
-            cost = s.cost
+            daily_totals[d_obj].add(s)
+            model_totals[model_name].add(s)
+            model_days[model_name].add(d_obj)
 
-            daily_token_totals[d_obj] += tokens
-            daily_cost_totals[d_obj] += cost
-
-            model_totals[model_name]["tokens"] += tokens
-            model_totals[model_name]["cost"] += cost
-            model_totals[model_name]["days"].add(d_obj)
-
-    if not daily_token_totals:
+    if not daily_totals:
         return
 
-    total_usage_days = len(daily_token_totals)
-    grand_total_tokens = sum(daily_token_totals.values())
-    grand_total_cost = sum(daily_cost_totals.values())
+    grand_total = ModelStats()
+    for s in daily_totals.values():
+        grand_total.add(s)
 
     print("\nSUMMARY STATISTICS (Averages per usage day)")
     print("-" * 30)
@@ -523,16 +514,18 @@ def print_summary_statistics(
 
     def print_period(label: str, usage_days: List[date]):
         d_count = len(usage_days)
-        t_sum = sum(daily_token_totals[d] for d in usage_days)
-        c_sum = sum(daily_cost_totals[d] for d in usage_days)
-        t_avg = t_sum / d_count if d_count > 0 else 0
-        c_avg = c_sum / d_count if d_count > 0 else 0
+        period_stats = ModelStats()
+        for d in usage_days:
+            period_stats.add(daily_totals[d])
+
+        t_avg = period_stats.total_tokens / d_count if d_count > 0 else 0
+        c_avg = period_stats.cost / d_count if d_count > 0 else 0
         print(
-            f"{label:<15} {d_count:>5} {t_sum:>15,} ${c_sum:>10.2f} "
+            f"{label:<15} {d_count:>5} {period_stats.total_tokens:>15,} ${period_stats.cost:>10.2f} "
             f"{int(t_avg):>15,} ${c_avg:>10.2f}"
         )
 
-    all_days = sorted(daily_token_totals.keys())
+    all_days = sorted(daily_totals.keys())
     print_period("All Time", all_days)
 
     last_7_cutoff = today_obj - timedelta(days=7)
@@ -552,15 +545,15 @@ def print_summary_statistics(
         print("-" * len(m_header))
 
         for model_name in sorted(model_totals.keys()):
-            m_data = model_totals[model_name]
-            days_active = len(m_data["days"])
-            m_avg_tokens = m_data["tokens"] / days_active if days_active else 0
-            m_avg_cost = m_data["cost"] / days_active if days_active else 0
+            m_stats = model_totals[model_name]
+            days_active = len(model_days[model_name])
+            m_avg_tokens = m_stats.total_tokens / days_active if days_active else 0
+            m_avg_cost = m_stats.cost / days_active if days_active else 0
 
             print(
                 f"{model_name:<45} {days_active:>5} "
-                f"{m_data['tokens']:>15,} {int(m_avg_tokens):>15,} "
-                f"${m_data['cost']:>10.2f} ${m_avg_cost:>10.2f}"
+                f"{m_stats.total_tokens:>15,} {int(m_avg_tokens):>15,} "
+                f"${m_stats.cost:>10.2f} ${m_avg_cost:>10.2f}"
             )
 
 

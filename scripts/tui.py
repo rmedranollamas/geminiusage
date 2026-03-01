@@ -9,7 +9,7 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import token_usage
 
@@ -36,13 +36,8 @@ class UsageTUI:
         self.view_rows: List[List[str]] = []
         self.view_data: List[Tuple[str, Union[str, Tuple[str, str]]]] = []
         self.col_widths: List[int] = []
-        self.totals: Dict[str, Union[int, float]] = {
-            "input": 0,
-            "cached": 0,
-            "output": 0,
-            "cost": 0.0,
-        }
-        self.model_totals: Dict[str, Dict[str, Union[int, float]]] = {}
+        self.totals = token_usage.ModelStats()
+        self.model_totals: Dict[str, token_usage.ModelStats] = {}
         self.filter_options = [
             "all",
             "today",
@@ -70,7 +65,7 @@ class UsageTUI:
         """Processes raw stats into displayable rows and calculates column widths."""
         self.view_rows = []
         self.view_data = []
-        self.totals = {"input": 0, "cached": 0, "output": 0, "cost": 0.0}
+        self.totals = token_usage.ModelStats()
         self.model_totals = {}
 
         filtered_stats = self.stats
@@ -85,23 +80,10 @@ class UsageTUI:
                 continue
             for model, s in filtered_stats[day].items():
                 if model not in self.model_totals:
-                    self.model_totals[model] = {
-                        "input": 0,
-                        "cached": 0,
-                        "output": 0,
-                        "cost": 0.0,
-                    }
+                    self.model_totals[model] = token_usage.ModelStats()
 
-                # ModelStats from token_usage uses .input_tokens etc.
-                self.model_totals[model]["input"] += s.input_tokens
-                self.model_totals[model]["cached"] += s.cached_tokens
-                self.model_totals[model]["output"] += s.output_tokens
-                self.model_totals[model]["cost"] += s.cost
-
-                self.totals["input"] += s.input_tokens
-                self.totals["cached"] += s.cached_tokens
-                self.totals["output"] += s.output_tokens
-                self.totals["cost"] += s.cost
+                self.model_totals[model].add(s)
+                self.totals.add(s)
 
         # 2. Build data rows for the main table
         for day in sorted(filtered_stats.keys(), reverse=True):
@@ -109,30 +91,24 @@ class UsageTUI:
                 continue
             if not self.show_models:
                 day_models = filtered_stats[day].values()
-                inp = sum(s.input_tokens for s in day_models)
-                cache = sum(s.cached_tokens for s in day_models)
-                out = sum(s.output_tokens for s in day_models)
-                cost = sum(s.cost for s in day_models)
-                sess: Set[str] = set()
+                day_stats = token_usage.ModelStats()
                 for s in day_models:
-                    sess.update(s.sessions)
+                    day_stats.add(s)
 
-                total = inp + cache + out
                 self.view_rows.append(
                     [
                         day,
-                        str(len(sess)),
-                        f"{inp:,}",
-                        f"{cache:,}",
-                        f"{out:,}",
-                        f"{total:,}",
-                        f"${cost:,.2f}",
+                        str(len(day_stats.sessions)),
+                        f"{day_stats.input_tokens:,}",
+                        f"{day_stats.cached_tokens:,}",
+                        f"{day_stats.output_tokens:,}",
+                        f"{day_stats.total_tokens:,}",
+                        f"${day_stats.cost:,.2f}",
                     ]
                 )
             else:
                 for model in sorted(filtered_stats[day].keys()):
                     s = filtered_stats[day][model]
-                    total = s.input_tokens + s.cached_tokens + s.output_tokens
                     self.view_rows.append(
                         [
                             day,
@@ -141,7 +117,7 @@ class UsageTUI:
                             f"{s.input_tokens:,}",
                             f"{s.cached_tokens:,}",
                             f"{s.output_tokens:,}",
-                            f"{total:,}",
+                            f"{s.total_tokens:,}",
                             f"${s.cost:,.2f}",
                         ]
                     )
@@ -214,7 +190,7 @@ class UsageTUI:
         )
 
         # Robust column indexing based on total number of columns
-        def format_total_line(label: str, stats: Dict[str, Any]) -> str:
+        def format_total_line(label: str, stats: token_usage.ModelStats) -> str:
             num_cols = len(self.col_widths)
             # Input, Cached, Output, Total, Cost are the last 5 columns
             cost_idx = num_cols - 1
@@ -228,13 +204,12 @@ class UsageTUI:
                 # Skip Model column (idx 1) and Sessions column (idx 2)
                 parts.append(f"{'':>{self.col_widths[2]}}")
 
-            t_in, t_ca, t_out = stats["input"], stats["cached"], stats["output"]
-            parts.append(f"{t_in:>{self.col_widths[input_idx]},}")
-            parts.append(f"{t_ca:>{self.col_widths[cached_idx]},}")
-            parts.append(f"{t_out:>{self.col_widths[out_idx]},}")
-            parts.append(f"{(t_in + t_ca + t_out):>{self.col_widths[total_idx]},}")
+            parts.append(f"{stats.input_tokens:>{self.col_widths[input_idx]},}")
+            parts.append(f"{stats.cached_tokens:>{self.col_widths[cached_idx]},}")
+            parts.append(f"{stats.output_tokens:>{self.col_widths[out_idx]},}")
+            parts.append(f"{stats.total_tokens:>{self.col_widths[total_idx]},}")
 
-            cost_str = f"${stats['cost']:,.2f}"
+            cost_str = f"${stats.cost:,.2f}"
             parts.append(f"{cost_str:>{self.col_widths[cost_idx]}}")
             return "  ".join(parts)
 
