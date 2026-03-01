@@ -89,11 +89,35 @@ def load_config() -> Config:
         try:
             with p.open("r", encoding="utf-8") as f:
                 data = json.load(f)
-                # Allow user to override or add patterns/rates
-                # (Implementation details for parsing JSON omitted for brevity but
-                # following the same pattern)
-                pass
-        except (json.JSONDecodeError, IOError):
+                if not isinstance(data, dict):
+                    return config
+
+                # Handle custom model overrides
+                custom_models = data.get("models", {})
+                for pattern, pricing_data in custom_models.items():
+                    if isinstance(pricing_data, list) and len(pricing_data) == 3:
+                        # Simple PricingTier [in, cached, out]
+                        tier = PricingTier(*[float(v) for v in pricing_data])
+                        config.models[pattern.lower()] = ModelPricing(tier)
+                    elif isinstance(pricing_data, dict):
+                        # Tiered Pricing
+                        small = pricing_data.get("small_context")
+                        large = pricing_data.get("large_context")
+                        threshold = pricing_data.get("context_threshold", 200_000)
+
+                        if isinstance(small, list) and len(small) == 3:
+                            s_tier = PricingTier(*[float(v) for v in small])
+                            l_tier = None
+                            if isinstance(large, list) and len(large) == 3:
+                                l_tier = PricingTier(*[float(v) for v in large])
+
+                            config.models[pattern.lower()] = ModelPricing(
+                                small_context=s_tier,
+                                large_context=l_tier,
+                                context_threshold=threshold,
+                            )
+        except (json.JSONDecodeError, IOError, ValueError, TypeError):
+            # Silently fallback to defaults if config is malformed
             pass
     return config
 
@@ -551,6 +575,12 @@ def main() -> None:
     parser.add_argument(
         "--raw", action="store_true", help="Print only the raw total token count."
     )
+    parser.add_argument(
+        "dir",
+        nargs="?",
+        default=None,
+        help="Optional path to search for session files.",
+    )
 
     date_group = parser.add_mutually_exclusive_group()
     date_group.add_argument(
@@ -576,7 +606,7 @@ def main() -> None:
     )
 
     args = parser.parse_args()
-    stats = aggregate_usage()
+    stats = aggregate_usage(args.dir)
 
     if args.today:
         print_report(

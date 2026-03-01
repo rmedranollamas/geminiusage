@@ -9,6 +9,7 @@ import unittest
 from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 # Add the scripts directory to path to import token_usage
 sys.path.append(os.path.dirname(__file__))
@@ -190,6 +191,66 @@ class TestTokenUsage(unittest.TestCase):
         token_usage.print_report(stats, raw_tokens_only=True)
         sys.stdout = sys.__stdout__
         self.assertEqual(captured_output.getvalue().strip(), "180")
+
+    def test_load_config_custom(self) -> None:
+        """Verifies parsing of custom pricing.json."""
+        with TemporaryDirectory() as tmpdirname:
+            tmp_path = Path(tmpdirname)
+            pricing_file = tmp_path / ".gemini" / "pricing.json"
+            pricing_file.parent.mkdir()
+
+            custom_pricing = {
+                "models": {
+                    "simple-model": [1.0, 0.1, 5.0],
+                    "tiered-model": {
+                        "small_context": [2.0, 0.2, 10.0],
+                        "large_context": [4.0, 0.4, 20.0],
+                        "context_threshold": 100_000,
+                    },
+                }
+            }
+            with pricing_file.open("w") as f:
+                json.dump(custom_pricing, f)
+
+            with patch("pathlib.Path.home", return_value=tmp_path):
+                config = token_usage.load_config()
+
+                # Check simple model
+                simple = config.get_pricing("simple-model")
+                self.assertEqual(simple.small_context.input_rate, 1.0)
+                self.assertIsNone(simple.large_context)
+
+                # Check tiered model
+                tiered = config.get_pricing("tiered-model")
+                self.assertEqual(tiered.small_context.input_rate, 2.0)
+                # Ensure large_context is present before checking rate
+                self.assertIsNotNone(tiered.large_context)
+                if tiered.large_context:
+                    self.assertEqual(tiered.large_context.input_rate, 4.0)
+                self.assertEqual(tiered.context_threshold, 100_000)
+
+    def test_aggregate_usage_custom_dir(self) -> None:
+        """Verifies that aggregate_usage handles a custom base_dir correctly."""
+        with TemporaryDirectory() as tmpdirname:
+            tmp_path = Path(tmpdirname)
+            session_file = tmp_path / "session-custom.json"
+
+            session_data = {
+                "sessionId": "custom-id",
+                "startTime": "2026-03-01T12:00:00Z",
+                "messages": [
+                    {"type": "gemini", "model": "m1", "tokens": {"input": 100}}
+                ],
+            }
+            with session_file.open("w") as f:
+                json.dump(session_data, f)
+
+            stats = token_usage.aggregate_usage(base_dir=tmp_path)
+            self.assertIn("2026-03-01", stats)
+            self.assertEqual(stats["2026-03-01"]["m1"].input_tokens, 100)
+
+            # Check local cache
+            self.assertTrue((tmp_path / "usage_cache.json").exists())
 
 
 if __name__ == "__main__":

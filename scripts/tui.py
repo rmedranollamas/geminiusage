@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Interactive Terminal User Interface for Gemini Token Usage."""
 
+import argparse
 import curses
 import json
 import os
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import token_usage
 
@@ -22,8 +24,9 @@ class UsageTUI:
     MENU_WIDTH = 24
     MIN_TOTALS_H = 3
 
-    def __init__(self):
+    def __init__(self, base_dir: Optional[str] = None):
         """Initializes the TUI state."""
+        self.base_dir = Path(base_dir) if base_dir else None
         self.stats: Dict[str, Dict[str, Any]] = {}
         self.current_filter = "all"
         self.show_models = False
@@ -34,20 +37,33 @@ class UsageTUI:
         self.view_data: List[Tuple[str, Union[str, Tuple[str, str]]]] = []
         self.col_widths: List[int] = []
         self.totals: Dict[str, Union[int, float]] = {
-            "input": 0, "cached": 0, "output": 0, "cost": 0.0
+            "input": 0,
+            "cached": 0,
+            "output": 0,
+            "cost": 0.0,
         }
         self.model_totals: Dict[str, Dict[str, Union[int, float]]] = {}
         self.filter_options = [
-            "all", "today", "yesterday", "this-week", "last-week", 
-            "this-month", "last-month"
+            "all",
+            "today",
+            "yesterday",
+            "this-week",
+            "last-week",
+            "this-month",
+            "last-month",
         ]
         self.show_filter_menu = False
         self.menu_selected = 0
         self.table_pad: Optional[Any] = None
 
+        # Auto-refresh settings
+        self.last_refresh = time.time()
+        self.refresh_interval = 30
+
     def load_data(self) -> None:
         """Loads usage data and refreshes the view."""
-        self.stats = token_usage.aggregate_usage()
+        self.stats = token_usage.aggregate_usage(self.base_dir)
+        self.last_refresh = time.time()
         self.refresh_view_data()
 
     def refresh_view_data(self) -> None:
@@ -70,9 +86,12 @@ class UsageTUI:
             for model, s in filtered_stats[day].items():
                 if model not in self.model_totals:
                     self.model_totals[model] = {
-                        "input": 0, "cached": 0, "output": 0, "cost": 0.0
+                        "input": 0,
+                        "cached": 0,
+                        "output": 0,
+                        "cost": 0.0,
                     }
-                
+
                 # ModelStats from token_usage uses .input_tokens etc.
                 self.model_totals[model]["input"] += s.input_tokens
                 self.model_totals[model]["cached"] += s.cached_tokens
@@ -97,34 +116,51 @@ class UsageTUI:
                 sess: Set[str] = set()
                 for s in day_models:
                     sess.update(s.sessions)
-                
+
                 total = inp + cache + out
-                self.view_rows.append([
-                    day, str(len(sess)), f"{inp:,}", f"{cache:,}", 
-                    f"{out:,}", f"{total:,}", f"${cost:,.2f}"
-                ])
+                self.view_rows.append(
+                    [
+                        day,
+                        str(len(sess)),
+                        f"{inp:,}",
+                        f"{cache:,}",
+                        f"{out:,}",
+                        f"{total:,}",
+                        f"${cost:,.2f}",
+                    ]
+                )
             else:
                 for model in sorted(filtered_stats[day].keys()):
                     s = filtered_stats[day][model]
                     total = s.input_tokens + s.cached_tokens + s.output_tokens
-                    self.view_rows.append([
-                        day, model, str(len(s.sessions)), f"{s.input_tokens:,}", 
-                        f"{s.cached_tokens:,}", f"{s.output_tokens:,}", f"{total:,}", 
-                        f"${s.cost:,.2f}"
-                    ])
+                    self.view_rows.append(
+                        [
+                            day,
+                            model,
+                            str(len(s.sessions)),
+                            f"{s.input_tokens:,}",
+                            f"{s.cached_tokens:,}",
+                            f"{s.output_tokens:,}",
+                            f"{total:,}",
+                            f"${s.cost:,.2f}",
+                        ]
+                    )
 
         # 3. Calculate dynamic column widths
-        header = (["DATE", "MODEL", "SESS", "INPUT", "CACHED", "OUTPUT", "TOTAL", "COST"] 
-                  if self.show_models else ["DATE", "SESS", "INPUT", "CACHED", "OUTPUT", "TOTAL", "COST"])
-        
+        header = (
+            ["DATE", "MODEL", "SESS", "INPUT", "CACHED", "OUTPUT", "TOTAL", "COST"]
+            if self.show_models
+            else ["DATE", "SESS", "INPUT", "CACHED", "OUTPUT", "TOTAL", "COST"]
+        )
+
         # Start with header widths
         self.col_widths = [len(h) for h in header]
-        
+
         # Update with data row widths
         for row in self.view_rows:
             for i, val in enumerate(row):
                 self.col_widths[i] = max(self.col_widths[i], len(val))
-        
+
         # Update with potential totals widths
         if self.show_models:
             for model in self.model_totals:
@@ -142,11 +178,19 @@ class UsageTUI:
         """Draws the top status bar."""
         _, w = stdscr.getmaxyx()
         model_status = "ON" if self.show_models else "OFF"
-        header = (f" Gemini Token Usage TUI | Filter: [{self.current_filter}] | "
-                  f"Models: {model_status} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ")
+
+        # Calculate countdown
+        time_since_refresh = time.time() - self.last_refresh
+        countdown = max(0, int(self.refresh_interval - time_since_refresh))
+
+        header = (
+            f" Gemini Token Usage TUI | Filter: [{self.current_filter}] | "
+            f"Models: {model_status} | Refresh in {countdown}s | "
+            f"{datetime.now().strftime('%H:%M:%S')} "
+        )
         stdscr.attron(curses.A_REVERSE)
         try:
-            stdscr.addstr(0, 0, header.ljust(w)[:w-1])
+            stdscr.addstr(0, 0, header.ljust(w)[: w - 1])
         except curses.error:
             pass
         stdscr.attroff(curses.A_REVERSE)
@@ -156,15 +200,19 @@ class UsageTUI:
         h, w = stdscr.getmaxyx()
         if height < self.MIN_TOTALS_H:
             height = self.MIN_TOTALS_H
-        
+
         win = curses.newwin(height, w, start_row, 0)
         win.box()
         win.attron(curses.A_BOLD)
         win.addstr(0, 2, f" TOTALS ({self.current_filter}) ")
         win.attroff(curses.A_BOLD)
-        
-        label_col_width = self.col_widths[0] + 2 + self.col_widths[1] if self.show_models else self.col_widths[0]
-        
+
+        label_col_width = (
+            self.col_widths[0] + 2 + self.col_widths[1]
+            if self.show_models
+            else self.col_widths[0]
+        )
+
         # Robust column indexing based on total number of columns
         def format_total_line(label: str, stats: Dict[str, Any]) -> str:
             num_cols = len(self.col_widths)
@@ -178,14 +226,14 @@ class UsageTUI:
             parts = [f"{label:<{label_col_width}}"]
             if self.show_models:
                 # Skip Model column (idx 1) and Sessions column (idx 2)
-                parts.append(f"{'':>{self.col_widths[2]}}") 
-            
+                parts.append(f"{'':>{self.col_widths[2]}}")
+
             t_in, t_ca, t_out = stats["input"], stats["cached"], stats["output"]
             parts.append(f"{t_in:>{self.col_widths[input_idx]},}")
             parts.append(f"{t_ca:>{self.col_widths[cached_idx]},}")
             parts.append(f"{t_out:>{self.col_widths[out_idx]},}")
             parts.append(f"{(t_in + t_ca + t_out):>{self.col_widths[total_idx]},}")
-            
+
             cost_str = f"${stats['cost']:,.2f}"
             parts.append(f"{cost_str:>{self.col_widths[cost_idx]}}")
             return "  ".join(parts)
@@ -196,19 +244,21 @@ class UsageTUI:
             for model in sorted_models:
                 if row_idx >= height - 2:
                     break
-                line = format_total_line(f"TOTAL ({model[:30]})", self.model_totals[model])
-                win.addstr(row_idx, 1, line[:w-2])
+                line = format_total_line(
+                    f"TOTAL ({model[:30]})", self.model_totals[model]
+                )
+                win.addstr(row_idx, 1, line[: w - 2])
                 row_idx += 1
             if row_idx < height - 1:
-                win.addstr(row_idx, 1, ("-" * (w - 2))[:w-2])
+                win.addstr(row_idx, 1, ("-" * (w - 2))[: w - 2])
                 row_idx += 1
 
         if row_idx < height - 1:
             line = format_total_line("GRAND TOTAL (ALL)", self.totals)
             win.attron(curses.A_BOLD)
-            win.addstr(row_idx, 1, line[:w-2])
+            win.addstr(row_idx, 1, line[: w - 2])
             win.attroff(curses.A_BOLD)
-        
+
         win.refresh()
 
     def draw_filter_menu(self, stdscr: Any) -> None:
@@ -218,18 +268,18 @@ class UsageTUI:
         menu_w = self.MENU_WIDTH
         start_y = (h - menu_h) // 2
         start_x = (w - menu_w) // 2
-        
+
         win = curses.newwin(menu_h, menu_w, start_y, start_x)
         win.box()
         win.addstr(0, 2, " Select Filter ")
-        
+
         for i, option in enumerate(self.filter_options):
             if i == self.menu_selected:
                 win.attron(curses.A_REVERSE)
             win.addstr(i + 1, 2, option.center(menu_w - 4))
             if i == self.menu_selected:
                 win.attroff(curses.A_REVERSE)
-        
+
         win.refresh()
 
     def draw_footer(self, stdscr: Any) -> None:
@@ -238,7 +288,7 @@ class UsageTUI:
         footer = " [Q] Quit | [R] Refresh | [M] Models | [F] Filter | [P] Pricing | [UP/DOWN] Select "
         stdscr.attron(curses.A_REVERSE)
         try:
-            stdscr.addstr(h - 1, 0, footer.ljust(w)[:w-1])
+            stdscr.addstr(h - 1, 0, footer.ljust(w)[: w - 1])
         except curses.error:
             pass
         stdscr.attroff(curses.A_REVERSE)
@@ -249,15 +299,15 @@ class UsageTUI:
         pricing_path.parent.mkdir(parents=True, exist_ok=True)
         if not pricing_path.exists():
             with pricing_path.open("w", encoding="utf-8") as f:
-                json.dump({"flash_patterns": [], "pro_patterns": []}, f, indent=2)
-        
+                json.dump({"models": {}}, f, indent=2)
+
         curses.def_shell_mode()
         stdscr.clear()
         stdscr.refresh()
-        editor = os.environ.get('EDITOR', 'vi')
+        editor = os.environ.get("EDITOR", "vi")
         subprocess.call([editor, str(pricing_path)])
         curses.reset_shell_mode()
-        
+
         token_usage.reload_config()
         self.load_data()
         self.table_pad = None
@@ -276,21 +326,21 @@ class UsageTUI:
                 self.scroll_y = 0
                 self.refresh_view_data()
                 self.table_pad = None
-            elif key in [27, ord('f'), ord('F')]:
+            elif key in [27, ord("f"), ord("F")]:
                 self.show_filter_menu = False
             return
 
-        if key in [ord('q'), ord('Q')]:
+        if key in [ord("q"), ord("Q")]:
             self.running = False
-        elif key in [ord('r'), ord('R')]:
+        elif key in [ord("r"), ord("R")]:
             self.load_data()
             self.table_pad = None
-        elif key in [ord('p'), ord('P')]:
+        elif key in [ord("p"), ord("P")]:
             self.edit_pricing(stdscr)
-        elif key in [ord('f'), ord('F')]:
+        elif key in [ord("f"), ord("F")]:
             self.show_filter_menu = True
             self.menu_selected = self.filter_options.index(self.current_filter)
-        elif key in [ord('m'), ord('M')]:
+        elif key in [ord("m"), ord("M")]:
             self.show_models = not self.show_models
             self.selected_row = 0
             self.scroll_y = 0
@@ -309,43 +359,52 @@ class UsageTUI:
         """Core application loop."""
         curses.curs_set(0)
         stdscr.keypad(True)
-        stdscr.nodelay(False)
-        
+        # Set a timeout for getch() to allow for auto-refresh
+        stdscr.timeout(1000)
+
         self.load_data()
         self.table_pad = None
-        
+
         while self.running:
+            # Check for auto-refresh
+            if time.time() - self.last_refresh >= self.refresh_interval:
+                self.load_data()
+                self.table_pad = None
+
             stdscr.erase()
             self.draw_header(stdscr)
             self.draw_footer(stdscr)
-            
+
             h, w = stdscr.getmaxyx()
-            
+
             # 1. Calculate layout
             totals_h = self.MIN_TOTALS_H
             if self.show_models:
                 totals_h = min(len(self.model_totals) + 4, h // 3)
-            
+
             table_y_start = 2
             table_y_end = h - totals_h - 2
             table_h = table_y_end - table_y_start + 1
-            
+
             # 2. Draw static table header
-            header_cols = (["DATE", "MODEL", "SESS", "INPUT", "CACHED", "OUTPUT", "TOTAL", "COST"] 
-                           if self.show_models else ["DATE", "SESS", "INPUT", "CACHED", "OUTPUT", "TOTAL", "COST"])
+            header_cols = (
+                ["DATE", "MODEL", "SESS", "INPUT", "CACHED", "OUTPUT", "TOTAL", "COST"]
+                if self.show_models
+                else ["DATE", "SESS", "INPUT", "CACHED", "OUTPUT", "TOTAL", "COST"]
+            )
             col_header = ""
             for i, col in enumerate(header_cols):
                 align = "<" if i < (2 if self.show_models else 1) else ">"
                 col_header += f"{col:{align}{self.col_widths[i]}}  "
             try:
-                stdscr.addstr(self.COL_HEADER_Y, 0, col_header[:w-1])
+                stdscr.addstr(self.COL_HEADER_Y, 0, col_header[: w - 1])
             except curses.error:
                 pass
 
             # 3. Handle pad creation and data rendering
             if not self.table_pad:
                 self.table_pad = curses.newpad(max(len(self.view_data) + 1, 100), 256)
-            
+
             self.table_pad.erase()
             for i, (line, _) in enumerate(self.view_data):
                 if i == self.selected_row:
@@ -353,7 +412,7 @@ class UsageTUI:
                 self.table_pad.addstr(i, 0, line)
                 if i == self.selected_row:
                     self.table_pad.attroff(curses.A_REVERSE)
-            
+
             # 4. Sync scrolling
             if self.selected_row < self.scroll_y:
                 self.scroll_y = self.selected_row
@@ -363,22 +422,35 @@ class UsageTUI:
             # 5. Refresh screen
             stdscr.noutrefresh()
             if table_h > 0:
-                self.table_pad.noutrefresh(self.scroll_y, 0, table_y_start, 0, table_y_end, w - 1)
-            
+                self.table_pad.noutrefresh(
+                    self.scroll_y, 0, table_y_start, 0, table_y_end, w - 1
+                )
+
             self.draw_totals(stdscr, h - totals_h - 1, totals_h)
-            
+
             if self.show_filter_menu:
                 self.draw_filter_menu(stdscr)
-            
+
             curses.doupdate()
-            
-            # 6. Process input
-            self.handle_input(stdscr.getch(), stdscr)
+
+            # 6. Process input (non-blocking thanks to timeout)
+            key = stdscr.getch()
+            if key != -1:
+                self.handle_input(key, stdscr)
 
 
 def main() -> None:
     """TUI Entry point."""
-    tui = UsageTUI()
+    parser = argparse.ArgumentParser(description="Interactive Gemini Token Usage TUI")
+    parser.add_argument(
+        "dir",
+        nargs="?",
+        default=None,
+        help="Optional path to search for session files.",
+    )
+    args = parser.parse_args()
+
+    tui = UsageTUI(base_dir=args.dir)
     curses.wrapper(tui.main_loop)
 
 
