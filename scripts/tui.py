@@ -50,6 +50,9 @@ class UsageTUI:
         self.show_filter_menu = False
         self.menu_selected = 0
         self.table_pad: Optional[Any] = None
+        self.totals_win: Optional[Any] = None
+        self.data_dirty = True
+        self.ui_dirty = True
 
         # Auto-refresh settings
         self.last_refresh = time.time()
@@ -60,6 +63,8 @@ class UsageTUI:
         self.stats = token_usage.aggregate_usage(self.base_dir)
         self.last_refresh = time.time()
         self.refresh_view_data()
+        self.data_dirty = True
+        self.ui_dirty = True
 
     def refresh_view_data(self) -> None:
         """Processes raw stats into displayable rows and calculates column widths."""
@@ -177,11 +182,17 @@ class UsageTUI:
         if height < self.MIN_TOTALS_H:
             height = self.MIN_TOTALS_H
 
-        win = curses.newwin(height, w, start_row, 0)
-        win.box()
-        win.attron(curses.A_BOLD)
-        win.addstr(0, 2, f" TOTALS ({self.current_filter}) ")
-        win.attroff(curses.A_BOLD)
+        if not self.totals_win:
+            self.totals_win = curses.newwin(height, w, start_row, 0)
+        else:
+            self.totals_win.mvwin(start_row, 0)
+            self.totals_win.resize(height, w)
+
+        self.totals_win.erase()
+        self.totals_win.box()
+        self.totals_win.attron(curses.A_BOLD)
+        self.totals_win.addstr(0, 2, f" TOTALS ({self.current_filter}) ")
+        self.totals_win.attroff(curses.A_BOLD)
 
         label_col_width = (
             self.col_widths[0] + 2 + self.col_widths[1]
@@ -222,19 +233,19 @@ class UsageTUI:
                 line = format_total_line(
                     f"TOTAL ({model[:30]})", self.model_totals[model]
                 )
-                win.addstr(row_idx, 1, line[: w - 2])
+                self.totals_win.addstr(row_idx, 1, line[: w - 2])
                 row_idx += 1
             if row_idx < height - 1:
-                win.addstr(row_idx, 1, ("-" * (w - 2))[: w - 2])
+                self.totals_win.addstr(row_idx, 1, ("-" * (w - 2))[: w - 2])
                 row_idx += 1
 
         if row_idx < height - 1:
             line = format_total_line("GRAND TOTAL (ALL)", self.totals)
-            win.attron(curses.A_BOLD)
-            win.addstr(row_idx, 1, line[: w - 2])
-            win.attroff(curses.A_BOLD)
+            self.totals_win.attron(curses.A_BOLD)
+            self.totals_win.addstr(row_idx, 1, line[: w - 2])
+            self.totals_win.attroff(curses.A_BOLD)
 
-        win.refresh()
+        self.totals_win.refresh()
 
     def draw_filter_menu(self, stdscr: Any) -> None:
         """Draws a centered popup menu for filter selection."""
@@ -292,8 +303,10 @@ class UsageTUI:
         if self.show_filter_menu:
             if key == curses.KEY_UP:
                 self.menu_selected = (self.menu_selected - 1) % len(self.filter_options)
+                self.ui_dirty = True
             elif key == curses.KEY_DOWN:
                 self.menu_selected = (self.menu_selected + 1) % len(self.filter_options)
+                self.ui_dirty = True
             elif key in [10, 13, curses.KEY_ENTER]:
                 self.current_filter = self.filter_options[self.menu_selected]
                 self.show_filter_menu = False
@@ -301,8 +314,11 @@ class UsageTUI:
                 self.scroll_y = 0
                 self.refresh_view_data()
                 self.table_pad = None
+                self.data_dirty = True
+                self.ui_dirty = True
             elif key in [27, ord("f"), ord("F")]:
                 self.show_filter_menu = False
+                self.ui_dirty = True
             return
 
         if key in [ord("q"), ord("Q")]:
@@ -315,20 +331,37 @@ class UsageTUI:
         elif key in [ord("f"), ord("F")]:
             self.show_filter_menu = True
             self.menu_selected = self.filter_options.index(self.current_filter)
+            self.ui_dirty = True
         elif key in [ord("m"), ord("M")]:
             self.show_models = not self.show_models
             self.selected_row = 0
             self.scroll_y = 0
             self.refresh_view_data()
             self.table_pad = None
+            self.data_dirty = True
+            self.ui_dirty = True
         elif key == curses.KEY_UP:
-            self.selected_row = max(0, self.selected_row - 1)
+            if self.selected_row > 0:
+                self.selected_row -= 1
+                self.ui_dirty = True
         elif key == curses.KEY_DOWN:
-            self.selected_row = min(len(self.view_data) - 1, self.selected_row + 1)
+            if self.selected_row < len(self.view_data) - 1:
+                self.selected_row += 1
+                self.ui_dirty = True
         elif key == curses.KEY_PPAGE:
-            self.selected_row = max(0, self.selected_row - 10)
+            new_row = max(0, self.selected_row - 10)
+            if new_row != self.selected_row:
+                self.selected_row = new_row
+                self.ui_dirty = True
         elif key == curses.KEY_NPAGE:
-            self.selected_row = min(len(self.view_data) - 1, self.selected_row + 10)
+            new_row = min(len(self.view_data) - 1, self.selected_row + 10)
+            if new_row != self.selected_row:
+                self.selected_row = new_row
+                self.ui_dirty = True
+        elif key == curses.KEY_RESIZE:
+            self.table_pad = None
+            self.totals_win = None
+            self.ui_dirty = True
 
     def main_loop(self, stdscr: Any) -> None:
         """Core application loop."""
@@ -346,11 +379,15 @@ class UsageTUI:
                 self.load_data()
                 self.table_pad = None
 
-            stdscr.erase()
-            self.draw_header(stdscr)
-            self.draw_footer(stdscr)
-
             h, w = stdscr.getmaxyx()
+            if h < 10 or w < 40:
+                stdscr.erase()
+                stdscr.addstr(0, 0, "Terminal too small")
+                stdscr.refresh()
+                key = stdscr.getch()
+                if key in [ord("q"), ord("Q")]:
+                    self.running = False
+                continue
 
             # 1. Calculate layout
             totals_h = self.MIN_TOTALS_H
@@ -361,57 +398,91 @@ class UsageTUI:
             table_y_end = h - totals_h - 2
             table_h = table_y_end - table_y_start + 1
 
-            # 2. Draw static table header
-            header_cols = (
-                ["DATE", "MODEL", "SESS", "INPUT", "CACHED", "OUTPUT", "TOTAL", "COST"]
-                if self.show_models
-                else ["DATE", "SESS", "INPUT", "CACHED", "OUTPUT", "TOTAL", "COST"]
-            )
-            col_header = ""
-            for i, col in enumerate(header_cols):
-                align = "<" if i < (2 if self.show_models else 1) else ">"
-                col_header += f"{col:{align}{self.col_widths[i]}}  "
-            try:
-                stdscr.addstr(self.COL_HEADER_Y, 0, col_header[: w - 1])
-            except curses.error:
-                pass
-
-            # 3. Handle pad creation and data rendering
-            if not self.table_pad:
-                self.table_pad = curses.newpad(max(len(self.view_data) + 1, 100), 256)
-
-            self.table_pad.erase()
-            for i, (line, _) in enumerate(self.view_data):
-                if i == self.selected_row:
-                    self.table_pad.attron(curses.A_REVERSE)
-                self.table_pad.addstr(i, 0, line)
-                if i == self.selected_row:
-                    self.table_pad.attroff(curses.A_REVERSE)
-
-            # 4. Sync scrolling
+            # Sync scrolling
             if self.selected_row < self.scroll_y:
                 self.scroll_y = self.selected_row
+                self.ui_dirty = True
             elif self.selected_row >= self.scroll_y + table_h:
                 self.scroll_y = self.selected_row - table_h + 1
+                self.ui_dirty = True
 
-            # 5. Refresh screen
-            stdscr.noutrefresh()
-            if table_h > 0:
-                self.table_pad.noutrefresh(
-                    self.scroll_y, 0, table_y_start, 0, table_y_end, w - 1
+            if self.ui_dirty:
+                stdscr.erase()
+                self.draw_header(stdscr)
+                self.draw_footer(stdscr)
+
+                # 2. Draw static table header
+                header_cols = (
+                    ["DATE", "MODEL", "SESS", "INPUT", "CACHED", "OUTPUT", "TOTAL", "COST"]
+                    if self.show_models
+                    else ["DATE", "SESS", "INPUT", "CACHED", "OUTPUT", "TOTAL", "COST"]
                 )
+                col_header = ""
+                for i, col in enumerate(header_cols):
+                    align = "<" if i < (2 if self.show_models else 1) else ">"
+                    col_header += f"{col:{align}{self.col_widths[i]}}  "
+                try:
+                    stdscr.addstr(self.COL_HEADER_Y, 0, col_header[: w - 1])
+                except curses.error:
+                    pass
 
-            self.draw_totals(stdscr, h - totals_h - 1, totals_h)
+                # 3. Handle pad creation and data rendering
+                if not self.table_pad:
+                    self.table_pad = curses.newpad(max(len(self.view_data) + 1, 100), 256)
+                    self.data_dirty = True
 
-            if self.show_filter_menu:
-                self.draw_filter_menu(stdscr)
+                if self.data_dirty:
+                    self.table_pad.erase()
+                    for i, (line, _) in enumerate(self.view_data):
+                        if i == self.selected_row:
+                            self.table_pad.attron(curses.A_REVERSE)
+                        self.table_pad.addstr(i, 0, line)
+                        if i == self.selected_row:
+                            self.table_pad.attroff(curses.A_REVERSE)
+                    self.data_dirty = False
+                else:
+                    # Just update the highlighting if selection changed but data didn't
+                    # (This is a simplified optimization, redrawing the whole pad is still better than every loop)
+                    self.table_pad.erase()
+                    for i, (line, _) in enumerate(self.view_data):
+                        if i == self.selected_row:
+                            self.table_pad.attron(curses.A_REVERSE)
+                        self.table_pad.addstr(i, 0, line)
+                        if i == self.selected_row:
+                            self.table_pad.attroff(curses.A_REVERSE)
 
-            curses.doupdate()
+                # 5. Refresh screen
+                stdscr.noutrefresh()
+                if table_h > 0:
+                    self.table_pad.noutrefresh(
+                        self.scroll_y, 0, table_y_start, 0, table_y_end, w - 1
+                    )
+
+                self.draw_totals(stdscr, h - totals_h - 1, totals_h)
+
+                if self.show_filter_menu:
+                    self.draw_filter_menu(stdscr)
+
+                curses.doupdate()
+                self.ui_dirty = False
+            else:
+                # Still draw header to update countdown if nothing else changed
+                self.draw_header(stdscr)
+                stdscr.refresh()
 
             # 6. Process input (non-blocking thanks to timeout)
-            key = stdscr.getch()
+            try:
+                key = stdscr.getch()
+            except curses.error:
+                key = -1
+
             if key != -1:
                 self.handle_input(key, stdscr)
+            else:
+                # If no key, and stdin is no longer a tty, we should probably exit
+                # to avoid an infinite loop of 100% CPU if the terminal is gone.
+                if not os.isatty(0):
+                    self.running = False
 
 
 def main() -> None:

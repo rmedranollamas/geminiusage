@@ -207,10 +207,42 @@ def aggregate_usage(
     if not tmp_dir.exists():
         return stats
 
+    import os
+
     updated_cache: Dict[str, Any] = {}
     cache_dirty = False
 
-    for session_file in tmp_dir.glob("**/session-*.json"):
+    # Targeted traversal for faster performance
+    session_files = []
+    try:
+        # Most session files are in ~/.gemini/tmp/<uuid>/chats/session-*.json
+        with os.scandir(str(tmp_dir)) as it:
+            for entry in it:
+                if entry.is_dir():
+                    chats_path = os.path.join(entry.path, "chats")
+                    if os.path.exists(chats_path):
+                        with os.scandir(chats_path) as it_chats:
+                            for f_entry in it_chats:
+                                if f_entry.is_file() and f_entry.name.startswith("session-") and f_entry.name.endswith(".json"):
+                                    session_files.append(Path(f_entry.path))
+                    else:
+                        # Fallback for other structures (recursive walk only if needed)
+                        # but for now let's just check the root of the uuid dir too
+                        with os.scandir(entry.path) as it_uuid:
+                            for f_entry in it_uuid:
+                                if f_entry.is_file() and f_entry.name.startswith("session-") and f_entry.name.endswith(".json"):
+                                    session_files.append(Path(f_entry.path))
+    except (IOError, OSError):
+        pass
+
+    # If no files found with targeted search, do a full walk as fallback
+    if not session_files:
+        for root, _, files in os.walk(str(tmp_dir)):
+            for filename in files:
+                if filename.startswith("session-") and filename.endswith(".json"):
+                    session_files.append(Path(root) / filename)
+
+    for session_file in session_files:
         try:
             mtime = session_file.stat().st_mtime
             file_key = str(session_file)
@@ -224,11 +256,6 @@ def aggregate_usage(
                     for model_name, s in models.items():
                         m_stats = stats[date_str][model_name]
                         m_stats.sessions.add(s["session_id"])
-
-                        # In new cache version, s["input"] will be uncached input.
-                        # In old cache version, it might be total input.
-                        # If s["input"] > s["cached"] and we suspect it's total,
-                        # we could subtract, but it's cleaner to just clear cache.
                         m_stats.input_tokens += s["input"]
                         m_stats.cached_tokens += s["cached"]
                         m_stats.output_tokens += s["output"]
@@ -255,51 +282,53 @@ def aggregate_usage(
 
             messages = data.get("messages") or []
             for msg in messages:
-                if not isinstance(msg, dict):
+                if not isinstance(msg, dict) or msg.get("type") != "gemini":
                     continue
-                if msg.get("type") == "gemini":
-                    model_name = msg.get("model", "unknown")
-                    tokens = msg.get("tokens") or {}
 
-                    inp = tokens.get("input", 0)
-                    cache_tokens = tokens.get("cached", 0)
-                    out = tokens.get("output", 0) + tokens.get("thoughts", 0)
+                model_name = msg.get("model", "unknown")
+                tokens = msg.get("tokens") or {}
 
-                    cost = calculate_cost(model_name, inp, cache_tokens, out)
-                    uncached_inp = max(0, inp - cache_tokens)
+                inp = tokens.get("input", 0)
+                cache_tokens = tokens.get("cached", 0)
+                out = tokens.get("output", 0) + tokens.get("thoughts", 0)
 
-                    # Update global aggregate
-                    m_stats = stats[date_str][model_name]
-                    m_stats.sessions.add(session_id)
-                    m_stats.input_tokens += uncached_inp
-                    m_stats.cached_tokens += cache_tokens
-                    m_stats.output_tokens += out
-                    m_stats.cost += cost
+                cost = calculate_cost(model_name, inp, cache_tokens, out)
+                uncached_inp = max(0, inp - cache_tokens)
 
-                    # Update file record for cache
-                    r_stats = file_record_stats[date_str][model_name]
-                    r_stats["session_id"] = session_id
-                    r_stats["input"] = r_stats.get("input", 0) + uncached_inp
-                    r_stats["cached"] = r_stats.get("cached", 0) + cache_tokens
-                    r_stats["output"] = r_stats.get("output", 0) + out
-                    r_stats["cost"] = r_stats.get("cost", 0) + cost
+                # Update global aggregate
+                m_stats = stats[date_str][model_name]
+                m_stats.sessions.add(session_id)
+                m_stats.input_tokens += uncached_inp
+                m_stats.cached_tokens += cache_tokens
+                m_stats.output_tokens += out
+                m_stats.cost += cost
+
+                # Update file record for cache
+                r_stats = file_record_stats[date_str][model_name]
+                r_stats["session_id"] = session_id
+                r_stats["input"] = r_stats.get("input", 0) + uncached_inp
+                r_stats["cached"] = r_stats.get("cached", 0) + cache_tokens
+                r_stats["output"] = r_stats.get("output", 0) + out
+                r_stats["cost"] = r_stats.get("cost", 0) + cost
 
             updated_cache[file_key] = {"mtime": mtime, "stats": file_record_stats}
 
         except (json.JSONDecodeError, IOError, KeyError):
             continue
-
     if cache_dirty or len(updated_cache) != len(cache):
         try:
-            with cache_file.open("w", encoding="utf-8") as f:
+            # Atomic write using a temporary file
+            import tempfile
+            fd, temp_path = tempfile.mkstemp(dir=str(cache_file.parent), prefix="usage_cache_")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(updated_cache, f)
-        except IOError:
+            os.replace(temp_path, str(cache_file))
+        except (IOError, OSError):
+            if "temp_path" in locals() and os.path.exists(temp_path):
+                os.unlink(temp_path)
             pass
         except TypeError as e:
-            # TypeError usually means something non-serializable got into the cache dict
-            # We don't want to crash the whole tool, but we shouldn't silently ignore it during dev
             import sys
-
             print(f"Error: Failed to serialize cache: {e}", file=sys.stderr)
 
     return stats
