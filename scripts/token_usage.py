@@ -174,12 +174,18 @@ def calculate_cost(
 
 def aggregate_usage(
     base_dir: Optional[Path] = None,
+    since_mtime: Optional[float] = None,
+    date_filter: Optional[Set[str]] = None,
 ) -> Dict[str, Dict[str, ModelStats]]:
     """Aggregates Gemini token usage from session JSON files.
 
     Args:
         base_dir: Optional path to search for session files.
                  Defaults to ~/.gemini/tmp.
+        since_mtime: Optional float timestamp. If provided, skips aggregating
+                    stats for files modified before this time.
+        date_filter: Optional set of date strings (YYYY-MM-DD). If provided,
+                    only aggregates stats for these dates.
 
     Returns:
         A nested dictionary: stats[date][model] = ModelStats
@@ -210,6 +216,10 @@ def aggregate_usage(
     import os
 
     updated_cache: Dict[str, Any] = {}
+    # Pre-populate updated_cache with everything from existing cache
+    # This ensures that if we do a partial scan (due to since_mtime),
+    # we don't lose the old data from the cache file.
+    updated_cache.update(cache)
     cache_dirty = False
 
     # Targeted traversal for faster performance
@@ -223,14 +233,21 @@ def aggregate_usage(
                     if os.path.exists(chats_path):
                         with os.scandir(chats_path) as it_chats:
                             for f_entry in it_chats:
-                                if f_entry.is_file() and f_entry.name.startswith("session-") and f_entry.name.endswith(".json"):
+                                if (
+                                    f_entry.is_file()
+                                    and f_entry.name.startswith("session-")
+                                    and f_entry.name.endswith(".json")
+                                ):
                                     session_files.append(Path(f_entry.path))
                     else:
-                        # Fallback for other structures (recursive walk only if needed)
-                        # but for now let's just check the root of the uuid dir too
+                        # Fallback for other structures
                         with os.scandir(entry.path) as it_uuid:
                             for f_entry in it_uuid:
-                                if f_entry.is_file() and f_entry.name.startswith("session-") and f_entry.name.endswith(".json"):
+                                if (
+                                    f_entry.is_file()
+                                    and f_entry.name.startswith("session-")
+                                    and f_entry.name.endswith(".json")
+                                ):
                                     session_files.append(Path(f_entry.path))
     except (IOError, OSError):
         pass
@@ -247,12 +264,31 @@ def aggregate_usage(
             mtime = session_file.stat().st_mtime
             file_key = str(session_file)
 
+            # Optimization: If we only care about recent files and this one is old
+            if since_mtime and mtime < since_mtime:
+                # Still check if we need to add its stats to the return value
+                if file_key in cache and cache[file_key]["mtime"] == mtime:
+                    file_stats = cache[file_key]["stats"]
+                    for date_str, models in file_stats.items():
+                        if date_filter and date_str not in date_filter:
+                            continue
+                        for model_name, s in models.items():
+                            m_stats = stats[date_str][model_name]
+                            m_stats.sessions.add(s["session_id"])
+                            m_stats.input_tokens += s["input"]
+                            m_stats.cached_tokens += s["cached"]
+                            m_stats.output_tokens += s["output"]
+                            m_stats.cost += s["cost"]
+                continue
+
             # Check cache for hits
             if file_key in cache and cache[file_key]["mtime"] == mtime:
                 file_stats = cache[file_key]["stats"]
                 updated_cache[file_key] = cache[file_key]
 
                 for date_str, models in file_stats.items():
+                    if date_filter and date_str not in date_filter:
+                        continue
                     for model_name, s in models.items():
                         m_stats = stats[date_str][model_name]
                         m_stats.sessions.add(s["session_id"])
@@ -295,21 +331,24 @@ def aggregate_usage(
                 cost = calculate_cost(model_name, inp, cache_tokens, out)
                 uncached_inp = max(0, inp - cache_tokens)
 
-                # Update global aggregate
-                m_stats = stats[date_str][model_name]
-                m_stats.sessions.add(session_id)
-                m_stats.input_tokens += uncached_inp
-                m_stats.cached_tokens += cache_tokens
-                m_stats.output_tokens += out
-                m_stats.cost += cost
-
-                # Update file record for cache
+                # Update file record for cache (ALWAYS do this so cache is complete)
                 r_stats = file_record_stats[date_str][model_name]
                 r_stats["session_id"] = session_id
                 r_stats["input"] = r_stats.get("input", 0) + uncached_inp
                 r_stats["cached"] = r_stats.get("cached", 0) + cache_tokens
                 r_stats["output"] = r_stats.get("output", 0) + out
                 r_stats["cost"] = r_stats.get("cost", 0) + cost
+
+                # Update global aggregate only if it passes the filters
+                if date_filter and date_str not in date_filter:
+                    continue
+
+                m_stats = stats[date_str][model_name]
+                m_stats.sessions.add(session_id)
+                m_stats.input_tokens += uncached_inp
+                m_stats.cached_tokens += cache_tokens
+                m_stats.output_tokens += out
+                m_stats.cost += cost
 
             updated_cache[file_key] = {"mtime": mtime, "stats": file_record_stats}
 
@@ -319,7 +358,10 @@ def aggregate_usage(
         try:
             # Atomic write using a temporary file
             import tempfile
-            fd, temp_path = tempfile.mkstemp(dir=str(cache_file.parent), prefix="usage_cache_")
+
+            fd, temp_path = tempfile.mkstemp(
+                dir=str(cache_file.parent), prefix="usage_cache_"
+            )
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(updated_cache, f)
             os.replace(temp_path, str(cache_file))
@@ -329,6 +371,7 @@ def aggregate_usage(
             pass
         except TypeError as e:
             import sys
+
             print(f"Error: Failed to serialize cache: {e}", file=sys.stderr)
 
     return stats
@@ -628,7 +671,54 @@ def main() -> None:
     )
 
     args = parser.parse_args()
-    stats = aggregate_usage(args.dir)
+
+    # Optimization: Calculate since_mtime and date_filter to speed up aggregation
+    since_mtime = None
+    date_filter = None
+
+    if args.today:
+        today_obj = datetime.now().date()
+        today_str = today_obj.strftime("%Y-%m-%d")
+        date_filter = {today_str}
+        since_mtime = datetime.combine(today_obj, datetime.min.time()).timestamp()
+    elif args.yesterday:
+        yesterday_obj = datetime.now().date() - timedelta(days=1)
+        yesterday_str = yesterday_obj.strftime("%Y-%m-%d")
+        date_filter = {yesterday_str}
+        since_mtime = datetime.combine(yesterday_obj, datetime.min.time()).timestamp()
+    elif args.this_week:
+        start_str, end_str = get_date_range("this-week")
+        if start_str and end_str:
+            date_filter = {
+                (
+                    datetime.strptime(start_str, "%Y-%m-%d").date() + timedelta(days=i)
+                ).strftime("%Y-%m-%d")
+                for i in range(
+                    (
+                        datetime.strptime(end_str, "%Y-%m-%d").date()
+                        - datetime.strptime(start_str, "%Y-%m-%d").date()
+                    ).days
+                    + 1
+                )
+            }
+            since_mtime = datetime.strptime(start_str, "%Y-%m-%d").timestamp()
+    elif args.date_range:
+        start_str, end_str = get_date_range(args.date_range)
+        if start_str and end_str:
+            try:
+                start_obj = datetime.strptime(start_str, "%Y-%m-%d").date()
+                end_obj = datetime.strptime(end_str, "%Y-%m-%d").date()
+                date_filter = {
+                    (start_obj + timedelta(days=i)).strftime("%Y-%m-%d")
+                    for i in range((end_obj - start_obj).days + 1)
+                }
+                since_mtime = datetime.combine(
+                    start_obj, datetime.min.time()
+                ).timestamp()
+            except ValueError:
+                pass
+
+    stats = aggregate_usage(args.dir, since_mtime=since_mtime, date_filter=date_filter)
 
     if args.today:
         print_report(
