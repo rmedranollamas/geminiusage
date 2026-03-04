@@ -179,7 +179,7 @@ def render_sparkline(values: List[int], width: int = 30) -> str:
     if not values:
         return ""
 
-    # Normalize to last 'width' elements
+    # Ensure we have exactly 'width' elements
     if len(values) > width:
         values = values[-width:]
     elif len(values) < width:
@@ -192,8 +192,12 @@ def render_sparkline(values: List[int], width: int = 30) -> str:
 
     spark = ""
     for v in values:
-        idx = int((v / max_val) * (len(chars) - 1))
-        spark += chars[idx]
+        if v == 0:
+            spark += " "
+        else:
+            # Ensure non-zero values get at least the first block character
+            idx = int((v / max_val) * (len(chars) - 1))
+            spark += chars[max(1, idx)]
     return spark
 
 
@@ -690,7 +694,9 @@ def print_report(
 
 
 def print_summary_statistics(
-    stats: Dict[str, Dict[str, ModelStats]], show_models: bool = False
+    stats: Dict[str, Dict[str, ModelStats]],
+    show_models: bool = False,
+    show_hours: bool = False,
 ) -> None:
     """Prints aggregate summary statistics (averages, historical trends)."""
     if not stats:
@@ -725,10 +731,12 @@ def print_summary_statistics(
     start_date = today_obj - timedelta(days=29)
     for i in range(30):
         d = start_date + timedelta(days=i)
-        spark_values.append(daily_totals.get(d, ModelStats()).total_tokens)
+        day_stat = daily_totals.get(d, ModelStats())
+        val = int(day_stat.duration_seconds) if show_hours else day_stat.total_tokens
+        spark_values.append(val)
 
-    print("\nTREND (Last 30 days)")
-    print(f"Tokens: {render_sparkline(spark_values)}")
+    print(f"\nTREND (Last 30 days {'Focus' if show_hours else 'Tokens'})")
+    print(f"{render_sparkline(spark_values)}")
 
     print("\nSUMMARY STATISTICS (Averages per usage day)")
     print("-" * 30)
@@ -933,7 +941,7 @@ def main() -> None:
             ]
         )
     ):
-        print_summary_statistics(stats, show_models=args.model)
+        print_summary_statistics(stats, show_models=args.model, show_hours=args.hours)
 
 
 if __name__ == "__main__":
