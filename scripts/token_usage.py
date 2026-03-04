@@ -215,12 +215,9 @@ def aggregate_usage(
 
     import os
 
-    updated_cache: Dict[str, Any] = {}
-    # Pre-populate updated_cache with everything from existing cache
-    # This ensures that if we do a partial scan (due to since_mtime),
-    # we don't lose the old data from the cache file.
-    updated_cache.update(cache)
     cache_dirty = False
+    # newly_parsed_entries stores only what we changed in this run
+    newly_parsed_entries: Dict[str, Any] = {}
 
     # Targeted traversal for faster performance
     session_files = []
@@ -284,8 +281,6 @@ def aggregate_usage(
             # Check cache for hits
             if file_key in cache and cache[file_key]["mtime"] == mtime:
                 file_stats = cache[file_key]["stats"]
-                updated_cache[file_key] = cache[file_key]
-
                 for date_str, models in file_stats.items():
                     if date_filter and date_str not in date_filter:
                         continue
@@ -350,29 +345,67 @@ def aggregate_usage(
                 m_stats.output_tokens += out
                 m_stats.cost += cost
 
-            updated_cache[file_key] = {"mtime": mtime, "stats": file_record_stats}
+            newly_parsed_entries[file_key] = {
+                "mtime": mtime,
+                "stats": file_record_stats,
+            }
 
         except (json.JSONDecodeError, IOError, KeyError):
             continue
-    if cache_dirty or len(updated_cache) != len(cache):
+
+    if cache_dirty:
+        # Process-safe update using fcntl.flock
+        lock_file_path = cache_file.with_suffix(".lock")
         try:
-            # Atomic write using a temporary file
-            import tempfile
+            import fcntl
 
-            fd, temp_path = tempfile.mkstemp(
-                dir=str(cache_file.parent), prefix="usage_cache_"
-            )
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(updated_cache, f)
-            os.replace(temp_path, str(cache_file))
-        except (IOError, OSError):
-            if "temp_path" in locals() and os.path.exists(temp_path):
-                os.unlink(temp_path)
-            pass
-        except TypeError as e:
-            import sys
+            # 1. Acquire exclusive lock
+            with lock_file_path.open("a+") as lock_f:
+                fcntl.flock(lock_f, fcntl.LOCK_EX)
 
-            print(f"Error: Failed to serialize cache: {e}", file=sys.stderr)
+                # 2. Re-read the latest cache from disk to avoid stomping
+                final_cache = {}
+                if cache_file.exists():
+                    try:
+                        with cache_file.open("r", encoding="utf-8") as f:
+                            final_cache = json.load(f)
+                    except (json.JSONDecodeError, IOError):
+                        pass
+
+                # 3. Merge ONLY the newly discovered entries
+                final_cache.update(newly_parsed_entries)
+
+                # 4. Atomic write using a temporary file
+                import tempfile
+
+                fd, temp_path = tempfile.mkstemp(
+                    dir=str(cache_file.parent), prefix="usage_cache_"
+                )
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        json.dump(final_cache, f)
+                    os.replace(temp_path, str(cache_file))
+                except (IOError, OSError, TypeError):
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
+                    raise
+        except (ImportError, IOError, OSError):
+            # Fallback for systems without fcntl or permission issues
+            # We still try to write even if locking fails, to be useful
+            if newly_parsed_entries:
+                try:
+                    import tempfile
+
+                    # Merge into our original cache and write
+                    cache.update(newly_parsed_entries)
+                    fd, temp_path = tempfile.mkstemp(
+                        dir=str(cache_file.parent), prefix="usage_cache_"
+                    )
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        json.dump(cache, f)
+                    os.replace(temp_path, str(cache_file))
+                except (IOError, OSError, TypeError, NameError):
+                    pass
 
     return stats
 
@@ -703,11 +736,11 @@ def main() -> None:
             }
             since_mtime = datetime.strptime(start_str, "%Y-%m-%d").timestamp()
     elif args.date_range:
-        start_str, end_str = get_date_range(args.date_range)
-        if start_str and end_str:
+        start_str, end_date_str = get_date_range(args.date_range)
+        if start_str and end_date_str:
             try:
                 start_obj = datetime.strptime(start_str, "%Y-%m-%d").date()
-                end_obj = datetime.strptime(end_str, "%Y-%m-%d").date()
+                end_obj = datetime.strptime(end_date_str, "%Y-%m-%d").date()
                 date_filter = {
                     (start_obj + timedelta(days=i)).strftime("%Y-%m-%d")
                     for i in range((end_obj - start_obj).days + 1)
