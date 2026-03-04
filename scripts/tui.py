@@ -66,6 +66,14 @@ class UsageTUI:
         self.data_dirty = True
         self.ui_dirty = True
 
+    def format_duration(self, seconds: float) -> str:
+        """Formats duration in seconds to a human-readable string."""
+        if seconds < 60:
+            return f"{seconds:.0f}s"
+        if seconds < 3600:
+            return f"{seconds / 60:.1f}m"
+        return f"{seconds / 3600:.1f}h"
+
     def refresh_view_data(self) -> None:
         """Processes raw stats into displayable rows and calculates column widths."""
         self.view_rows = []
@@ -104,6 +112,7 @@ class UsageTUI:
                     [
                         day,
                         str(len(day_stats.sessions)),
+                        self.format_duration(day_stats.duration_seconds),
                         f"{day_stats.input_tokens:,}",
                         f"{day_stats.cached_tokens:,}",
                         f"{day_stats.output_tokens:,}",
@@ -119,6 +128,7 @@ class UsageTUI:
                             day,
                             model,
                             str(len(s.sessions)),
+                            self.format_duration(s.duration_seconds),
                             f"{s.input_tokens:,}",
                             f"{s.cached_tokens:,}",
                             f"{s.output_tokens:,}",
@@ -129,9 +139,19 @@ class UsageTUI:
 
         # 3. Calculate dynamic column widths
         header = (
-            ["DATE", "MODEL", "SESS", "INPUT", "CACHED", "OUTPUT", "TOTAL", "COST"]
+            [
+                "DATE",
+                "MODEL",
+                "SESS",
+                "FOCUS",
+                "INPUT",
+                "CACHED",
+                "OUTPUT",
+                "TOTAL",
+                "COST",
+            ]
             if self.show_models
-            else ["DATE", "SESS", "INPUT", "CACHED", "OUTPUT", "TOTAL", "COST"]
+            else ["DATE", "SESS", "FOCUS", "INPUT", "CACHED", "OUTPUT", "TOTAL", "COST"]
         )
 
         # Start with header widths
@@ -203,18 +223,22 @@ class UsageTUI:
         # Robust column indexing based on total number of columns
         def format_total_line(label: str, stats: token_usage.ModelStats) -> str:
             num_cols = len(self.col_widths)
-            # Input, Cached, Output, Total, Cost are the last 5 columns
+            # Cost, Total, Output, Cached, Input, Focus are the last 6 columns
             cost_idx = num_cols - 1
             total_idx = num_cols - 2
             out_idx = num_cols - 3
             cached_idx = num_cols - 4
             input_idx = num_cols - 5
+            focus_idx = num_cols - 6
 
             parts = [f"{label:<{label_col_width}}"]
-            if self.show_models:
-                # Skip Model column (idx 1) and Sessions column (idx 2)
-                parts.append(f"{'':>{self.col_widths[2]}}")
+            # Skip the 'SESS' column which is before FOCUS
+            sess_idx = 2 if self.show_models else 1
+            parts.append(f"{'':>{self.col_widths[sess_idx]}}")
 
+            parts.append(
+                f"{self.format_duration(stats.duration_seconds):>{self.col_widths[focus_idx]}}"
+            )
             parts.append(f"{stats.input_tokens:>{self.col_widths[input_idx]},}")
             parts.append(f"{stats.cached_tokens:>{self.col_widths[cached_idx]},}")
             parts.append(f"{stats.output_tokens:>{self.col_widths[out_idx]},}")
@@ -413,7 +437,16 @@ class UsageTUI:
 
                 # 2. Draw static table header
                 header_cols = (
-                    ["DATE", "MODEL", "SESS", "INPUT", "CACHED", "OUTPUT", "TOTAL", "COST"]
+                    [
+                        "DATE",
+                        "MODEL",
+                        "SESS",
+                        "INPUT",
+                        "CACHED",
+                        "OUTPUT",
+                        "TOTAL",
+                        "COST",
+                    ]
                     if self.show_models
                     else ["DATE", "SESS", "INPUT", "CACHED", "OUTPUT", "TOTAL", "COST"]
                 )
@@ -428,7 +461,9 @@ class UsageTUI:
 
                 # 3. Handle pad creation and data rendering
                 if not self.table_pad:
-                    self.table_pad = curses.newpad(max(len(self.view_data) + 1, 100), 256)
+                    self.table_pad = curses.newpad(
+                        max(len(self.view_data) + 1, 100), 256
+                    )
                     self.data_dirty = True
 
                 if self.data_dirty:

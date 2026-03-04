@@ -19,6 +19,7 @@ class ModelStats:
     cached_tokens: int = 0
     output_tokens: int = 0
     cost: float = 0.0
+    duration_seconds: float = 0.0
 
     @property
     def total_tokens(self) -> int:
@@ -32,6 +33,7 @@ class ModelStats:
         self.cached_tokens += other.cached_tokens
         self.output_tokens += other.output_tokens
         self.cost += other.cost
+        self.duration_seconds += other.duration_seconds
 
 
 @dataclass
@@ -172,6 +174,29 @@ def calculate_cost(
     ) / 1_000_000
 
 
+def render_sparkline(values: List[int], width: int = 30) -> str:
+    """Renders a simple ASCII sparkline from a list of values."""
+    if not values:
+        return ""
+
+    # Normalize to last 'width' elements
+    if len(values) > width:
+        values = values[-width:]
+    elif len(values) < width:
+        values = [0] * (width - len(values)) + values
+
+    chars = " ▂▃▄▅▆▇█"
+    max_val = max(values)
+    if max_val == 0:
+        return " " * width
+
+    spark = ""
+    for v in values:
+        idx = int((v / max_val) * (len(chars) - 1))
+        spark += chars[idx]
+    return spark
+
+
 def aggregate_usage(
     base_dir: Optional[Path] = None,
     since_mtime: Optional[float] = None,
@@ -276,6 +301,7 @@ def aggregate_usage(
                             m_stats.cached_tokens += s["cached"]
                             m_stats.output_tokens += s["output"]
                             m_stats.cost += s["cost"]
+                            m_stats.duration_seconds += s.get("duration", 0.0)
                 continue
 
             # Check cache for hits
@@ -291,6 +317,7 @@ def aggregate_usage(
                         m_stats.cached_tokens += s["cached"]
                         m_stats.output_tokens += s["output"]
                         m_stats.cost += s["cost"]
+                        m_stats.duration_seconds += s.get("duration", 0.0)
                 continue
 
             # Cache miss or stale: parse the file
@@ -312,16 +339,60 @@ def aggregate_usage(
             )
 
             messages = data.get("messages") or []
+            turn_start_ts = None
+            turn_end_ts = None
+            last_model_in_turn = "unknown"
+
             for msg in messages:
-                if not isinstance(msg, dict) or msg.get("type") != "gemini":
+                if not isinstance(msg, dict):
+                    continue
+
+                msg_type = msg.get("type")
+                raw_ts = msg.get("timestamp")
+                ts_val = None
+                if raw_ts:
+                    try:
+                        ts_val = datetime.fromisoformat(
+                            raw_ts.replace("Z", "+00:00")
+                        ).timestamp()
+                    except (ValueError, AttributeError):
+                        pass
+
+                if msg_type == "user" and ts_val:
+                    if turn_start_ts and turn_end_ts:
+                        stats[date_str][last_model_in_turn].duration_seconds += max(
+                            0, turn_end_ts - turn_start_ts
+                        )
+                        file_record_stats[date_str][last_model_in_turn]["duration"] = (
+                            file_record_stats[date_str][last_model_in_turn].get(
+                                "duration", 0.0
+                            )
+                            + max(0, turn_end_ts - turn_start_ts)
+                        )
+
+                    turn_start_ts = ts_val
+                    turn_end_ts = None
+                    continue
+
+                if msg_type != "gemini":
                     continue
 
                 model_name = msg.get("model", "unknown")
+                last_model_in_turn = model_name
+                if ts_val:
+                    turn_end_ts = ts_val
+
                 tokens = msg.get("tokens") or {}
 
-                inp = tokens.get("input", 0)
+                # tool tokens included in input per clanker-stats analysis
+                inp = tokens.get("input", 0) + tokens.get("tool", 0)
                 cache_tokens = tokens.get("cached", 0)
                 out = tokens.get("output", 0) + tokens.get("thoughts", 0)
+
+                # Total fallback
+                total_val = tokens.get("total", 0)
+                if total_val > 0 and (inp + cache_tokens + out) == 0:
+                    inp = total_val
 
                 cost = calculate_cost(model_name, inp, cache_tokens, out)
                 uncached_inp = max(0, inp - cache_tokens)
@@ -345,11 +416,19 @@ def aggregate_usage(
                 m_stats.output_tokens += out
                 m_stats.cost += cost
 
+            if turn_start_ts and turn_end_ts:
+                stats[date_str][last_model_in_turn].duration_seconds += max(
+                    0, turn_end_ts - turn_start_ts
+                )
+                file_record_stats[date_str][last_model_in_turn]["duration"] = (
+                    file_record_stats[date_str][last_model_in_turn].get("duration", 0.0)
+                    + max(0, turn_end_ts - turn_start_ts)
+                )
+
             newly_parsed_entries[file_key] = {
                 "mtime": mtime,
                 "stats": file_record_stats,
             }
-
         except (json.JSONDecodeError, IOError, KeyError):
             continue
 
@@ -487,6 +566,7 @@ def print_report(
     show_models: bool = False,
     today_only: bool = False,
     raw_tokens_only: bool = False,
+    show_hours: bool = False,
 ) -> None:
     """Prints a formatted report of token usage.
 
@@ -495,6 +575,7 @@ def print_report(
         show_models: Whether to show per-model breakdown.
         today_only: Whether to limit the report to today's usage.
         raw_tokens_only: If True, only prints the total token count.
+        show_hours: If True, shows Focus Time instead of tokens.
     """
     today_str = datetime.now().strftime("%Y-%m-%d")
 
@@ -518,12 +599,24 @@ def print_report(
         print(grand_total.total_tokens)
         return
 
+    def format_duration(seconds: float) -> str:
+        if seconds < 60:
+            return f"{seconds:.0f}s"
+        if seconds < 3600:
+            return f"{seconds / 60:.1f}m"
+        return f"{seconds / 3600:.1f}h"
+
     # Header configuration
     model_header = f"{'MODEL':<40} " if show_models else ""
-    header = (
-        f"{'DATE':<12} {model_header}{'SESS':<5} {'INPUT':>12} "
-        f"{'CACHED':>12} {'OUTPUT':>12} {'TOTAL':>12} {'COST':>10}"
-    )
+    if show_hours:
+        header = (
+            f"{'DATE':<12} {model_header}{'SESS':<5} {'FOCUS TIME':>12} {'COST':>10}"
+        )
+    else:
+        header = (
+            f"{'DATE':<12} {model_header}{'SESS':<5} {'INPUT':>12} "
+            f"{'CACHED':>12} {'OUTPUT':>12} {'TOTAL':>12} {'COST':>10}"
+        )
     line_len = len(header) + 2
     print(header)
     print("-" * line_len)
@@ -536,22 +629,34 @@ def print_report(
             for s in stats[date_str].values():
                 day_stats.add(s)
 
-            print(
-                f"{display_date:<12} {len(day_stats.sessions):<5} "
-                f"{day_stats.input_tokens:>12,} {day_stats.cached_tokens:>12,} {day_stats.output_tokens:>12,} "
-                f"{day_stats.total_tokens:>12,} ${day_stats.cost:>8.2f}"
-            )
+            if show_hours:
+                print(
+                    f"{display_date:<12} {len(day_stats.sessions):<5} "
+                    f"{format_duration(day_stats.duration_seconds):>12} ${day_stats.cost:>8.2f}"
+                )
+            else:
+                print(
+                    f"{display_date:<12} {len(day_stats.sessions):<5} "
+                    f"{day_stats.input_tokens:>12,} {day_stats.cached_tokens:>12,} {day_stats.output_tokens:>12,} "
+                    f"{day_stats.total_tokens:>12,} ${day_stats.cost:>8.2f}"
+                )
 
             grand_total.add(day_stats)
         else:
             for model_name in sorted(stats[date_str].keys()):
                 s = stats[date_str][model_name]
-                print(
-                    f"{display_date:<12} {model_name[:40]:<40} "
-                    f"{len(s.sessions):<5} {s.input_tokens:>12,} "
-                    f"{s.cached_tokens:>12,} {s.output_tokens:>12,} "
-                    f"{s.total_tokens:>12,} ${s.cost:>8.2f}"
-                )
+                if show_hours:
+                    print(
+                        f"{display_date:<12} {model_name[:40]:<40} "
+                        f"{len(s.sessions):<5} {format_duration(s.duration_seconds):>12} ${s.cost:>8.2f}"
+                    )
+                else:
+                    print(
+                        f"{display_date:<12} {model_name[:40]:<40} "
+                        f"{len(s.sessions):<5} {s.input_tokens:>12,} "
+                        f"{s.cached_tokens:>12,} {s.output_tokens:>12,} "
+                        f"{s.total_tokens:>12,} ${s.cost:>8.2f}"
+                    )
 
                 grand_total.add(s)
                 model_grand_totals[model_name].add(s)
@@ -564,14 +669,24 @@ def print_report(
         for model_name in sorted(model_grand_totals.keys()):
             m_stats = model_grand_totals[model_name]
             label = f"TOTALS ({model_name[:40]})"
-            print(f"{label:<59} {m_stats.total_tokens:>50,} ${m_stats.cost:>8.2f}")
+            if show_hours:
+                print(
+                    f"{label:<59} {format_duration(m_stats.duration_seconds):>50} ${m_stats.cost:>8.2f}"
+                )
+            else:
+                print(f"{label:<59} {m_stats.total_tokens:>50,} ${m_stats.cost:>8.2f}")
         print("-" * line_len)
 
     total_label = "TOTALS (ALL)" if show_models else "TOTALS"
     offset = 59 if show_models else 18
-    print(
-        f"{total_label:<{offset}} {grand_total.total_tokens:>50,} ${grand_total.cost:>8.2f}"
-    )
+    if show_hours:
+        print(
+            f"{total_label:<{offset}} {format_duration(grand_total.duration_seconds):>50} ${grand_total.cost:>8.2f}"
+        )
+    else:
+        print(
+            f"{total_label:<{offset}} {grand_total.total_tokens:>50,} ${grand_total.cost:>8.2f}"
+        )
 
 
 def print_summary_statistics(
@@ -603,19 +718,32 @@ def print_summary_statistics(
     if not daily_totals:
         return
 
-    grand_total = ModelStats()
-    for s in daily_totals.values():
-        grand_total.add(s)
+    all_days = sorted(daily_totals.keys())
+
+    # Sparkline (last 30 days)
+    spark_values = []
+    start_date = today_obj - timedelta(days=29)
+    for i in range(30):
+        d = start_date + timedelta(days=i)
+        spark_values.append(daily_totals.get(d, ModelStats()).total_tokens)
+
+    print("\nTREND (Last 30 days)")
+    print(f"Tokens: {render_sparkline(spark_values)}")
 
     print("\nSUMMARY STATISTICS (Averages per usage day)")
     print("-" * 30)
 
     gen_header = (
-        f"{'PERIOD':<15} {'DAYS':>5} {'TOKENS':>15} {'COST':>12} "
+        f"{'PERIOD':<15} {'DAYS':>5} {'TOKENS':>15} {'FOCUS':>10} {'COST':>12} "
         f"{'AVG TOKENS/D':>15} {'AVG COST/D':>12}"
     )
     print(gen_header)
     print("-" * len(gen_header))
+
+    def format_duration(seconds: float) -> str:
+        if seconds < 3600:
+            return f"{seconds / 60:.1f}m"
+        return f"{seconds / 3600:.1f}h"
 
     def print_period(label: str, usage_days: List[date]):
         d_count = len(usage_days)
@@ -626,11 +754,10 @@ def print_summary_statistics(
         t_avg = period_stats.total_tokens / d_count if d_count > 0 else 0
         c_avg = period_stats.cost / d_count if d_count > 0 else 0
         print(
-            f"{label:<15} {d_count:>5} {period_stats.total_tokens:>15,} ${period_stats.cost:>10.2f} "
+            f"{label:<15} {d_count:>5} {period_stats.total_tokens:>15,} {format_duration(period_stats.duration_seconds):>10} ${period_stats.cost:>10.2f} "
             f"{int(t_avg):>15,} ${c_avg:>10.2f}"
         )
 
-    all_days = sorted(daily_totals.keys())
     print_period("All Time", all_days)
 
     last_7_cutoff = today_obj - timedelta(days=7)
@@ -644,7 +771,7 @@ def print_summary_statistics(
         print("-" * 30)
         m_header = (
             f"{'MODEL':<45} {'DAYS':>5} {'TOTAL TOKENS':>15} "
-            f"{'AVG TOKENS/D':>15} {'TOTAL COST':>12} {'AVG COST/D':>12}"
+            f"{'FOCUS':>10} {'AVG TOKENS/D':>15} {'TOTAL COST':>12} {'AVG COST/D':>12}"
         )
         print(m_header)
         print("-" * len(m_header))
@@ -657,8 +784,8 @@ def print_summary_statistics(
 
             print(
                 f"{model_name:<45} {days_active:>5} "
-                f"{m_stats.total_tokens:>15,} {int(m_avg_tokens):>15,} "
-                f"${m_stats.cost:>10.2f} ${m_avg_cost:>10.2f}"
+                f"{m_stats.total_tokens:>15,} {format_duration(m_stats.duration_seconds):>10} "
+                f"{int(m_avg_tokens):>15,} ${m_stats.cost:>10.2f} ${m_avg_cost:>10.2f}"
             )
 
 
@@ -672,6 +799,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--raw", action="store_true", help="Print only the raw total token count."
+    )
+    parser.add_argument(
+        "--hours",
+        action="store_true",
+        help="Show Focus Time (active hours) instead of tokens.",
     )
     parser.add_argument(
         "dir",
@@ -755,7 +887,11 @@ def main() -> None:
 
     if args.today:
         print_report(
-            stats, show_models=args.model, today_only=True, raw_tokens_only=args.raw
+            stats,
+            show_models=args.model,
+            today_only=True,
+            raw_tokens_only=args.raw,
+            show_hours=args.hours,
         )
     else:
         start_date, end_date = None, None
@@ -776,7 +912,11 @@ def main() -> None:
             stats = filter_stats(stats, start_date, end_date)
 
         print_report(
-            stats, show_models=args.model, today_only=False, raw_tokens_only=args.raw
+            stats,
+            show_models=args.model,
+            today_only=False,
+            raw_tokens_only=args.raw,
+            show_hours=args.hours,
         )
 
     if (
