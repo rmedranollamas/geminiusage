@@ -24,11 +24,11 @@ class UsageTUI:
     MENU_WIDTH = 24
     MIN_TOTALS_H = 3
 
-    def __init__(self, base_dir: Optional[str] = None):
+    def __init__(self, base_dir: Optional[str] = None, initial_filter: str = "all"):
         """Initializes the TUI state."""
         self.base_dir = Path(base_dir) if base_dir else None
         self.stats: Dict[str, Dict[str, Any]] = {}
-        self.current_filter = "all"
+        self.current_filter = initial_filter
         self.show_models = False
         self.running = True
         self.scroll_y = 0
@@ -47,8 +47,11 @@ class UsageTUI:
             "this-month",
             "last-month",
         ]
+        if self.current_filter not in self.filter_options:
+            self.filter_options.append(self.current_filter)
+
         self.show_filter_menu = False
-        self.menu_selected = 0
+        self.menu_selected = self.filter_options.index(self.current_filter)
         self.table_pad: Optional[Any] = None
         self.totals_win: Optional[Any] = None
         self.data_dirty = True
@@ -529,9 +532,12 @@ def main() -> None:
         default=None,
         help="Optional path to search for session files.",
     )
+    parser.add_argument(
+        "--since", help="Usage since a specific date (YYYY-MM-DD), inclusive."
+    )
     args = parser.parse_args()
 
-    tui = UsageTUI(base_dir=args.dir)
+    tui = UsageTUI(base_dir=args.dir, initial_filter=args.since if args.since else "all")
     curses.wrapper(tui.main_loop)
 
 

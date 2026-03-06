@@ -161,6 +161,24 @@ class TestTokenUsage(unittest.TestCase):
         filtered = token_usage.filter_stats(stats, "2026-01-10", "2026-01-31")
         self.assertEqual(list(filtered.keys()), ["2026-01-15"])
 
+    def test_since_logic(self) -> None:
+        """Verifies the logic used for the --since flag."""
+        from datetime import date, timedelta
+        # Simulated 'since' date
+        start_obj = date(2026, 1, 15)
+        today_obj = date(2026, 1, 17)
+
+        # Logic from main()
+        date_filter = {
+            (start_obj + timedelta(days=i)).strftime("%Y-%m-%d")
+            for i in range((today_obj - start_obj).days + 1)
+        }
+
+        self.assertEqual(len(date_filter), 3)
+        self.assertIn("2026-01-15", date_filter)
+        self.assertIn("2026-01-16", date_filter)
+        self.assertIn("2026-01-17", date_filter)
+
     def test_config_model_matching(self) -> None:
         """Tests that config correctly identifies models by substring."""
         config = token_usage.Config()

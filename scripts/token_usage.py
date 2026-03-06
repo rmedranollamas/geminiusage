@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -540,6 +541,15 @@ def get_date_range(
         if len(parts) == 2:
             return parts[0], parts[1]
 
+    # Try to parse as a single date (meaning "since")
+    try:
+        datetime.strptime(filter_name, "%Y-%m-%d")
+        if today_obj is None:
+            today_obj = datetime.now().date()
+        return filter_name, today_obj.strftime("%Y-%m-%d")
+    except ValueError:
+        pass
+
     return None, None
 
 
@@ -697,6 +707,7 @@ def print_summary_statistics(
     stats: Dict[str, Dict[str, ModelStats]],
     show_models: bool = False,
     show_hours: bool = False,
+    since_date: Optional[str] = None,
 ) -> None:
     """Prints aggregate summary statistics (averages, historical trends)."""
     if not stats:
@@ -726,23 +737,24 @@ def print_summary_statistics(
 
     all_days = sorted(daily_totals.keys())
 
-    # Sparkline (last 30 days)
-    spark_values = []
-    start_date = today_obj - timedelta(days=29)
-    for i in range(30):
-        d = start_date + timedelta(days=i)
-        day_stat = daily_totals.get(d, ModelStats())
-        val = int(day_stat.duration_seconds) if show_hours else day_stat.total_tokens
-        spark_values.append(val)
+    if not since_date:
+        # Sparkline (last 30 days)
+        spark_values = []
+        start_date = today_obj - timedelta(days=29)
+        for i in range(30):
+            d = start_date + timedelta(days=i)
+            day_stat = daily_totals.get(d, ModelStats())
+            val = int(day_stat.duration_seconds) if show_hours else day_stat.total_tokens
+            spark_values.append(val)
 
-    print(f"\nTREND (Last 30 days {'Focus' if show_hours else 'Tokens'})")
-    print(f"{render_sparkline(spark_values)}")
+        print(f"\nTREND (Last 30 days {'Focus' if show_hours else 'Tokens'})")
+        print(f"{render_sparkline(spark_values)}")
 
     print("\nSUMMARY STATISTICS (Averages per usage day)")
     print("-" * 30)
 
     gen_header = (
-        f"{'PERIOD':<15} {'DAYS':>5} {'TOKENS':>15} {'FOCUS':>10} {'COST':>12} "
+        f"{'PERIOD':<16} {'DAYS':>5} {'TOKENS':>15} {'FOCUS':>10} {'COST':>12} "
         f"{'AVG TOKENS/D':>15} {'AVG COST/D':>12}"
     )
     print(gen_header)
@@ -762,17 +774,20 @@ def print_summary_statistics(
         t_avg = period_stats.total_tokens / d_count if d_count > 0 else 0
         c_avg = period_stats.cost / d_count if d_count > 0 else 0
         print(
-            f"{label:<15} {d_count:>5} {period_stats.total_tokens:>15,} {format_duration(period_stats.duration_seconds):>10} ${period_stats.cost:>10.2f} "
+            f"{label[:16]:<16} {d_count:>5} {period_stats.total_tokens:>15,} {format_duration(period_stats.duration_seconds):>10} ${period_stats.cost:>10.2f} "
             f"{int(t_avg):>15,} ${c_avg:>10.2f}"
         )
 
-    print_period("All Time", all_days)
+    if since_date:
+        print_period(f"Since {since_date}", all_days)
+    else:
+        print_period("All Time", all_days)
 
-    last_7_cutoff = today_obj - timedelta(days=7)
-    print_period("Last 7 Days", [d for d in all_days if d >= last_7_cutoff])
+        last_7_cutoff = today_obj - timedelta(days=7)
+        print_period("Last 7 Days", [d for d in all_days if d >= last_7_cutoff])
 
-    last_30_cutoff = today_obj - timedelta(days=30)
-    print_period("Last 30 Days", [d for d in all_days if d >= last_30_cutoff])
+        last_30_cutoff = today_obj - timedelta(days=30)
+        print_period("Last 30 Days", [d for d in all_days if d >= last_30_cutoff])
 
     if show_models and model_totals:
         print("\nSUMMARY BY MODEL")
@@ -842,6 +857,9 @@ def main() -> None:
     date_group.add_argument(
         "--date-range", help="Usage for a specific range (YYYY-MM-DD:YYYY-MM-DD)."
     )
+    date_group.add_argument(
+        "--since", help="Usage since a specific date (YYYY-MM-DD), inclusive."
+    )
 
     args = parser.parse_args()
 
@@ -859,6 +877,18 @@ def main() -> None:
         yesterday_str = yesterday_obj.strftime("%Y-%m-%d")
         date_filter = {yesterday_str}
         since_mtime = datetime.combine(yesterday_obj, datetime.min.time()).timestamp()
+    elif args.since:
+        try:
+            start_obj = datetime.strptime(args.since, "%Y-%m-%d").date()
+            today_obj = datetime.now().date()
+            date_filter = {
+                (start_obj + timedelta(days=i)).strftime("%Y-%m-%d")
+                for i in range((today_obj - start_obj).days + 1)
+            }
+            since_mtime = datetime.combine(start_obj, datetime.min.time()).timestamp()
+        except ValueError:
+            print(f"Error: Invalid date format for --since: {args.since}. Use YYYY-MM-DD.")
+            sys.exit(1)
     elif args.this_week:
         start_str, end_str = get_date_range("this-week")
         if start_str and end_str:
@@ -915,6 +945,9 @@ def main() -> None:
             start_date, end_date = get_date_range("last-month")
         elif args.date_range:
             start_date, end_date = get_date_range(args.date_range)
+        elif args.since:
+            start_date = args.since
+            end_date = datetime.now().strftime("%Y-%m-%d")
 
         if start_date and end_date:
             stats = filter_stats(stats, start_date, end_date)
@@ -941,7 +974,7 @@ def main() -> None:
             ]
         )
     ):
-        print_summary_statistics(stats, show_models=args.model, show_hours=args.hours)
+        print_summary_statistics(stats, show_models=args.model, show_hours=args.hours, since_date=args.since)
 
 
 if __name__ == "__main__":
