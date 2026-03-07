@@ -69,6 +69,41 @@ class TestTokenUsage(unittest.TestCase):
                 stats_cached["2026-01-20"]["gemini-3-flash"].cached_tokens, 50
             )
 
+    @patch("fcntl.flock")
+    def test_aggregation_non_blocking_lock(self, mock_flock) -> None:
+        """Verifies that if the lock cannot be acquired, we still return stats but do not write cache."""
+        mock_flock.side_effect = BlockingIOError("Lock busy")
+        with TemporaryDirectory() as tmpdirname:
+            tmp_path = Path(tmpdirname)
+            chat_dir = tmp_path / "project1" / "chats"
+            chat_dir.mkdir(parents=True)
+
+            session_data = {
+                "sessionId": "test-session-concurrent",
+                "startTime": "2026-01-20T12:00:00Z",
+                "messages": [
+                    {
+                        "type": "gemini",
+                        "model": "gemini-3-flash",
+                        "tokens": {"input": 100},
+                    },
+                ],
+            }
+            session_file = chat_dir / "session-1.json"
+            with session_file.open("w") as f:
+                json.dump(session_data, f)
+
+            # Execution with simulated lock contention
+            stats = token_usage.aggregate_usage(base_dir=tmp_path)
+            
+            # Stats should still be parsed from disk correctly
+            self.assertIn("2026-01-20", stats)
+            self.assertEqual(stats["2026-01-20"]["gemini-3-flash"].input_tokens, 100)
+
+            # But the cache file should NOT have been created/written
+            cache_file = tmp_path / "usage_cache.json"
+            self.assertFalse(cache_file.exists())
+
     def test_aggregation_robustness(self) -> None:
         """Verifies that aggregation handles malformed or null-valued JSON fields."""
         with TemporaryDirectory() as tmpdirname:

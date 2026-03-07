@@ -4,7 +4,7 @@ A lightweight Python utility to track, aggregate, and visualize token usage and 
 
 ## Features
 
-- **High-Performance Aggregation**: Recursively scans session logs with persistent caching (`usage_cache.json`) for near-instant results on subsequent runs.
+- **High-Performance Aggregation**: Recursively scans session logs with persistent caching (`usage_cache.json`) for near-instant results on subsequent runs. Uses non-blocking concurrency locks, making it safe and lag-free for background polling (like tmux status bars).
 - **Interactive TUI**: A `curses`-based dashboard with auto-refresh (every 30s), live countdowns, and scrollable tables.
 - **Flexible Pricing**: Supports tiered pricing (e.g., higher rates for >200k context) and user-defined overrides via `pricing.json`.
 - **Comprehensive Reporting**: Filter by date ranges (`today`, `this-week`, `last-month`, etc.) or custom YYYY-MM-DD ranges.

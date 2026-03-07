@@ -6,7 +6,7 @@ This project is a lightweight, high-performance Python utility designed to track
 
 - **Core Logic (`scripts/token_usage.py`)**: Handles recursive file scanning, JSON parsing, tiered cost calculation, and persistent caching (`usage_cache.json`).
 - **Interactive Dashboard (`scripts/tui.py`)**: A curses-based TUI with auto-refresh (30s interval), live countdowns, and dynamic filtering.
-- **Data Persistence**: Uses a local cache to avoid re-parsing unchanged session files, making it suitable for frequent execution (e.g., every 30 seconds).
+- **Data Persistence**: Uses a local cache (`usage_cache.json`) to avoid re-parsing unchanged session files, making it suitable for frequent execution (e.g., every 30 seconds or in tmux status bars). Concurrent executions use non-blocking locks to ensure the UI never freezes during cache rebuilds.
 - **Configuration**: Supports custom pricing overrides via `~/.gemini/pricing.json`.
 
 ## Building and Running
@@ -32,7 +32,7 @@ The project relies exclusively on the Python 3 standard library (no external `pi
 ## Development Conventions
 
 - **Standard Library First**: Prioritize Python's standard library modules (`curses`, `argparse`, `dataclasses`, `pathlib`, `json`, `datetime`) to keep the project zero-dependency and easy to distribute.
-- **Performance**: Any changes to data ingestion must respect the `usage_cache.json` logic (checking `mtime` before parsing).
+- **Performance**: Any changes to data ingestion must respect the `usage_cache.json` logic (checking `mtime` before parsing). Locking should always be non-blocking (`fcntl.LOCK_NB`) so concurrent reads (e.g. tmux status updates) degrade gracefully to parsing raw files instead of freezing.
 - **Testing Strategy**:
   - Use `unittest` and `unittest.mock` for core logic and UI state testing.
   - Logic tests should use `tempfile.TemporaryDirectory` to simulate filesystem environments.
