@@ -468,7 +468,13 @@ def aggregate_usage(
         import fcntl
 
         with lock_file_path.open("a+") as lock_f:
-            fcntl.flock(lock_f, fcntl.LOCK_EX)
+            try:
+                # Use non-blocking lock. If another process is writing the cache,
+                # we skip writing to prevent the current process (e.g., tmux) from hanging.
+                fcntl.flock(lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                has_lock = True
+            except (BlockingIOError, IOError, OSError):
+                has_lock = False
 
             current_cache = {}
             if cache_file.exists():
@@ -482,7 +488,7 @@ def aggregate_usage(
                 current_cache
             )
 
-            if cache_dirty:
+            if cache_dirty and has_lock:
                 current_cache.update(newly_parsed_entries)
                 import tempfile
 
