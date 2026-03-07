@@ -295,14 +295,7 @@ def aggregate_usage(
         tmp_dir = gemini_dir / "tmp"
         cache_file = gemini_dir / "usage_cache.json"
 
-    cache: Dict[str, Any] = {}
-    if cache_file.exists() and not force_refresh:
-        try:
-            with cache_file.open("r", encoding="utf-8") as f:
-                cache = json.load(f)
-        except (json.JSONDecodeError, IOError):
-            pass
-
+    lock_file_path = cache_file.with_suffix(".lock")
     stats: Dict[str, Dict[str, ModelStats]] = defaultdict(
         lambda: defaultdict(ModelStats)
     )
@@ -310,190 +303,187 @@ def aggregate_usage(
     if not tmp_dir.exists():
         return stats
 
-    cache_dirty = force_refresh
-    # newly_parsed_entries stores only what we changed in this run
-    newly_parsed_entries: Dict[str, Any] = {}
+    def perform_aggregation(
+        cache: Dict[str, Any],
+    ) -> Tuple[Dict[str, Dict[str, ModelStats]], Dict[str, Any], bool]:
+        """Internal helper to perform the actual aggregation logic."""
+        agg_stats: Dict[str, Dict[str, ModelStats]] = defaultdict(
+            lambda: defaultdict(ModelStats)
+        )
+        newly_parsed: Dict[str, Any] = {}
+        dirty = force_refresh
+        session_files = discover_session_files(tmp_dir)
 
-    session_files = discover_session_files(tmp_dir)
+        for session_file in session_files:
+            try:
+                mtime = session_file.stat().st_mtime
+                file_key = str(session_file)
 
-    for session_file in session_files:
-        try:
-            mtime = session_file.stat().st_mtime
-            file_key = str(session_file)
+                # Optimization: If we only care about recent files and this one is old
+                if not force_refresh and since_mtime and mtime < since_mtime:
+                    if file_key in cache and cache[file_key]["mtime"] == mtime:
+                        file_stats = cache[file_key]["stats"]
+                        for date_str, models in file_stats.items():
+                            if date_filter and date_str not in date_filter:
+                                continue
+                            for model_name, s in models.items():
+                                m_stats = agg_stats[date_str][model_name]
+                                m_stats.sessions.add(s["session_id"])
+                                m_stats.input_tokens += s["input"]
+                                m_stats.cached_tokens += s["cached"]
+                                m_stats.output_tokens += s["output"]
+                                m_stats.cost += s["cost"]
+                                m_stats.duration_seconds += s.get("duration", 0.0)
+                    continue
 
-            # Optimization: If we only care about recent files and this one is old
-            if not force_refresh and since_mtime and mtime < since_mtime:
-                # Still check if we need to add its stats to the return value
-                if file_key in cache and cache[file_key]["mtime"] == mtime:
+                # Check cache for hits
+                if (
+                    not force_refresh
+                    and file_key in cache
+                    and cache[file_key]["mtime"] == mtime
+                ):
                     file_stats = cache[file_key]["stats"]
                     for date_str, models in file_stats.items():
                         if date_filter and date_str not in date_filter:
                             continue
                         for model_name, s in models.items():
-                            m_stats = stats[date_str][model_name]
+                            m_stats = agg_stats[date_str][model_name]
                             m_stats.sessions.add(s["session_id"])
                             m_stats.input_tokens += s["input"]
                             m_stats.cached_tokens += s["cached"]
                             m_stats.output_tokens += s["output"]
                             m_stats.cost += s["cost"]
                             m_stats.duration_seconds += s.get("duration", 0.0)
-                continue
+                    continue
 
-            # Check cache for hits
-            if (
-                not force_refresh
-                and file_key in cache
-                and cache[file_key]["mtime"] == mtime
-            ):
-                file_stats = cache[file_key]["stats"]
-                for date_str, models in file_stats.items():
+                # Cache miss or stale: parse the file
+                dirty = True
+                with session_file.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                if not isinstance(data, dict):
+                    continue
+
+                session_id = data.get("sessionId") or session_file.stem
+                raw_start_time = data.get("startTime")
+                start_time = str(raw_start_time) if raw_start_time else ""
+                date_str = start_time.split("T")[0] if "T" in start_time else "unknown"
+
+                file_record_stats: Dict[str, Dict[str, Any]] = defaultdict(
+                    lambda: defaultdict(dict)
+                )
+
+                messages = data.get("messages") or []
+                turn_start_ts = None
+                turn_end_ts = None
+                last_model_in_turn = "unknown"
+
+                for msg in messages:
+                    if not isinstance(msg, dict):
+                        continue
+
+                    msg_type = msg.get("type")
+                    raw_ts = msg.get("timestamp")
+                    ts_val = None
+                    if raw_ts:
+                        try:
+                            ts_val = datetime.fromisoformat(
+                                raw_ts.replace("Z", "+00:00")
+                            ).timestamp()
+                        except (ValueError, AttributeError):
+                            pass
+
+                    if msg_type == "user" and ts_val:
+                        if turn_start_ts and turn_end_ts:
+                            agg_stats[date_str][
+                                last_model_in_turn
+                            ].duration_seconds += max(0, turn_end_ts - turn_start_ts)
+                            file_record_stats[date_str][last_model_in_turn][
+                                "duration"
+                            ] = file_record_stats[date_str][last_model_in_turn].get(
+                                "duration", 0.0
+                            ) + max(0, turn_end_ts - turn_start_ts)
+
+                        turn_start_ts = ts_val
+                        turn_end_ts = None
+                        continue
+
+                    if msg_type != "gemini":
+                        continue
+
+                    model_name = msg.get("model", "unknown")
+                    last_model_in_turn = model_name
+                    if ts_val:
+                        turn_end_ts = ts_val
+
+                    tokens = msg.get("tokens") or {}
+                    inp = tokens.get("input", 0) + tokens.get("tool", 0)
+                    cache_tokens = tokens.get("cached", 0)
+                    out = tokens.get("output", 0) + tokens.get("thoughts", 0)
+
+                    total_val = tokens.get("total", 0)
+                    if total_val > 0 and (inp + cache_tokens + out) == 0:
+                        inp = total_val
+
+                    cost = calculate_cost(model_name, inp, cache_tokens, out)
+                    uncached_inp = max(0, inp - cache_tokens)
+
+                    r_stats = file_record_stats[date_str][model_name]
+                    r_stats["session_id"] = session_id
+                    r_stats["input"] = r_stats.get("input", 0) + uncached_inp
+                    r_stats["cached"] = r_stats.get("cached", 0) + cache_tokens
+                    r_stats["output"] = r_stats.get("output", 0) + out
+                    r_stats["cost"] = r_stats.get("cost", 0) + cost
+
                     if date_filter and date_str not in date_filter:
                         continue
-                    for model_name, s in models.items():
-                        m_stats = stats[date_str][model_name]
-                        m_stats.sessions.add(s["session_id"])
-                        m_stats.input_tokens += s["input"]
-                        m_stats.cached_tokens += s["cached"]
-                        m_stats.output_tokens += s["output"]
-                        m_stats.cost += s["cost"]
-                        m_stats.duration_seconds += s.get("duration", 0.0)
+
+                    m_stats = agg_stats[date_str][model_name]
+                    m_stats.sessions.add(session_id)
+                    m_stats.input_tokens += uncached_inp
+                    m_stats.cached_tokens += cache_tokens
+                    m_stats.output_tokens += out
+                    m_stats.cost += cost
+
+                if turn_start_ts and turn_end_ts:
+                    agg_stats[date_str][last_model_in_turn].duration_seconds += max(
+                        0, turn_end_ts - turn_start_ts
+                    )
+                    file_record_stats[date_str][last_model_in_turn]["duration"] = (
+                        file_record_stats[date_str][last_model_in_turn].get(
+                            "duration", 0.0
+                        )
+                        + max(0, turn_end_ts - turn_start_ts)
+                    )
+
+                newly_parsed[file_key] = {
+                    "mtime": mtime,
+                    "stats": file_record_stats,
+                }
+            except (json.JSONDecodeError, IOError, KeyError):
                 continue
+        return agg_stats, newly_parsed, dirty
 
-            # Cache miss or stale: parse the file
-            cache_dirty = True
-            with session_file.open("r", encoding="utf-8") as f:
-                data = json.load(f)
+    try:
+        import fcntl
 
-            if not isinstance(data, dict):
-                continue
+        with lock_file_path.open("a+") as lock_f:
+            fcntl.flock(lock_f, fcntl.LOCK_EX)
 
-            session_id = data.get("sessionId") or session_file.stem
-            raw_start_time = data.get("startTime")
-            start_time = str(raw_start_time) if raw_start_time else ""
-            date_str = start_time.split("T")[0] if "T" in start_time else "unknown"
+            current_cache = {}
+            if cache_file.exists():
+                try:
+                    with cache_file.open("r", encoding="utf-8") as f:
+                        current_cache = json.load(f)
+                except (json.JSONDecodeError, IOError):
+                    pass
 
-            # Temporary stats for this specific file to update cache
-            file_record_stats: Dict[str, Dict[str, Any]] = defaultdict(
-                lambda: defaultdict(dict)
+            stats, newly_parsed_entries, cache_dirty = perform_aggregation(
+                current_cache
             )
 
-            messages = data.get("messages") or []
-            turn_start_ts = None
-            turn_end_ts = None
-            last_model_in_turn = "unknown"
-
-            for msg in messages:
-                if not isinstance(msg, dict):
-                    continue
-
-                msg_type = msg.get("type")
-                raw_ts = msg.get("timestamp")
-                ts_val = None
-                if raw_ts:
-                    try:
-                        ts_val = datetime.fromisoformat(
-                            raw_ts.replace("Z", "+00:00")
-                        ).timestamp()
-                    except (ValueError, AttributeError):
-                        pass
-
-                if msg_type == "user" and ts_val:
-                    if turn_start_ts and turn_end_ts:
-                        stats[date_str][last_model_in_turn].duration_seconds += max(
-                            0, turn_end_ts - turn_start_ts
-                        )
-                        file_record_stats[date_str][last_model_in_turn]["duration"] = (
-                            file_record_stats[date_str][last_model_in_turn].get(
-                                "duration", 0.0
-                            )
-                            + max(0, turn_end_ts - turn_start_ts)
-                        )
-
-                    turn_start_ts = ts_val
-                    turn_end_ts = None
-                    continue
-
-                if msg_type != "gemini":
-                    continue
-
-                model_name = msg.get("model", "unknown")
-                last_model_in_turn = model_name
-                if ts_val:
-                    turn_end_ts = ts_val
-
-                tokens = msg.get("tokens") or {}
-
-                # tool tokens included in input per clanker-stats analysis
-                inp = tokens.get("input", 0) + tokens.get("tool", 0)
-                cache_tokens = tokens.get("cached", 0)
-                out = tokens.get("output", 0) + tokens.get("thoughts", 0)
-
-                # Total fallback
-                total_val = tokens.get("total", 0)
-                if total_val > 0 and (inp + cache_tokens + out) == 0:
-                    inp = total_val
-
-                cost = calculate_cost(model_name, inp, cache_tokens, out)
-                uncached_inp = max(0, inp - cache_tokens)
-
-                # Update file record for cache (ALWAYS do this so cache is complete)
-                r_stats = file_record_stats[date_str][model_name]
-                r_stats["session_id"] = session_id
-                r_stats["input"] = r_stats.get("input", 0) + uncached_inp
-                r_stats["cached"] = r_stats.get("cached", 0) + cache_tokens
-                r_stats["output"] = r_stats.get("output", 0) + out
-                r_stats["cost"] = r_stats.get("cost", 0) + cost
-
-                # Update global aggregate only if it passes the filters
-                if date_filter and date_str not in date_filter:
-                    continue
-
-                m_stats = stats[date_str][model_name]
-                m_stats.sessions.add(session_id)
-                m_stats.input_tokens += uncached_inp
-                m_stats.cached_tokens += cache_tokens
-                m_stats.output_tokens += out
-                m_stats.cost += cost
-
-            if turn_start_ts and turn_end_ts:
-                stats[date_str][last_model_in_turn].duration_seconds += max(
-                    0, turn_end_ts - turn_start_ts
-                )
-                file_record_stats[date_str][last_model_in_turn]["duration"] = (
-                    file_record_stats[date_str][last_model_in_turn].get("duration", 0.0)
-                    + max(0, turn_end_ts - turn_start_ts)
-                )
-
-            newly_parsed_entries[file_key] = {
-                "mtime": mtime,
-                "stats": file_record_stats,
-            }
-        except (json.JSONDecodeError, IOError, KeyError):
-            continue
-
-    if cache_dirty:
-        # Process-safe update using fcntl.flock
-        lock_file_path = cache_file.with_suffix(".lock")
-        try:
-            import fcntl
-
-            # 1. Acquire exclusive lock
-            with lock_file_path.open("a+") as lock_f:
-                fcntl.flock(lock_f, fcntl.LOCK_EX)
-
-                # 2. Re-read the latest cache from disk to avoid stomping
-                final_cache = {}
-                if cache_file.exists():
-                    try:
-                        with cache_file.open("r", encoding="utf-8") as f:
-                            final_cache = json.load(f)
-                    except (json.JSONDecodeError, IOError):
-                        pass
-
-                # 3. Merge ONLY the newly discovered entries
-                final_cache.update(newly_parsed_entries)
-
-                # 4. Atomic write using a temporary file
+            if cache_dirty:
+                current_cache.update(newly_parsed_entries)
                 import tempfile
 
                 fd, temp_path = tempfile.mkstemp(
@@ -501,29 +491,35 @@ def aggregate_usage(
                 )
                 try:
                     with os.fdopen(fd, "w", encoding="utf-8") as f:
-                        json.dump(final_cache, f)
+                        json.dump(current_cache, f)
                     os.replace(temp_path, str(cache_file))
                 except (IOError, OSError, TypeError):
                     if os.path.exists(temp_path):
                         os.unlink(temp_path)
                     raise
-        except (ImportError, IOError, OSError):
-            # Fallback for systems without fcntl or permission issues
-            # We still try to write even if locking fails, to be useful
-            if newly_parsed_entries:
-                try:
-                    import tempfile
+    except (ImportError, IOError, OSError):
+        # Fallback for systems without fcntl
+        current_cache = {}
+        if cache_file.exists() and not force_refresh:
+            try:
+                with cache_file.open("r", encoding="utf-8") as f:
+                    current_cache = json.load(f)
+            except (json.JSONDecodeError, IOError):
+                pass
+        stats, newly_parsed_entries, cache_dirty = perform_aggregation(current_cache)
+        if cache_dirty:
+            try:
+                import tempfile
 
-                    # Merge into our original cache and write
-                    cache.update(newly_parsed_entries)
-                    fd, temp_path = tempfile.mkstemp(
-                        dir=str(cache_file.parent), prefix="usage_cache_"
-                    )
-                    with os.fdopen(fd, "w", encoding="utf-8") as f:
-                        json.dump(cache, f)
-                    os.replace(temp_path, str(cache_file))
-                except (IOError, OSError, TypeError, NameError):
-                    pass
+                current_cache.update(newly_parsed_entries)
+                fd, temp_path = tempfile.mkstemp(
+                    dir=str(cache_file.parent), prefix="usage_cache_"
+                )
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(current_cache, f)
+                os.replace(temp_path, str(cache_file))
+            except (IOError, OSError, TypeError, NameError):
+                pass
 
     return stats
 
