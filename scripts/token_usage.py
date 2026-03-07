@@ -228,8 +228,6 @@ def discover_session_files(tmp_dir: Path) -> List[Path]:
     Returns:
         A list of Path objects for the discovered session files.
     """
-    import os
-
     session_files = []
     try:
         # Most session files are in ~/.gemini/tmp/<uuid>/chats/session-*.json
@@ -273,6 +271,7 @@ def aggregate_usage(
     base_dir: Optional[Path] = None,
     since_mtime: Optional[float] = None,
     date_filter: Optional[Set[str]] = None,
+    force_refresh: bool = False,
 ) -> Dict[str, Dict[str, ModelStats]]:
     """Aggregates Gemini token usage from session JSON files.
 
@@ -283,6 +282,7 @@ def aggregate_usage(
                     stats for files modified before this time.
         date_filter: Optional set of date strings (YYYY-MM-DD). If provided,
                     only aggregates stats for these dates.
+        force_refresh: If True, ignores the cache and re-parses all files.
 
     Returns:
         A nested dictionary: stats[date][model] = ModelStats
@@ -296,7 +296,7 @@ def aggregate_usage(
         cache_file = gemini_dir / "usage_cache.json"
 
     cache: Dict[str, Any] = {}
-    if cache_file.exists():
+    if cache_file.exists() and not force_refresh:
         try:
             with cache_file.open("r", encoding="utf-8") as f:
                 cache = json.load(f)
@@ -310,7 +310,7 @@ def aggregate_usage(
     if not tmp_dir.exists():
         return stats
 
-    cache_dirty = False
+    cache_dirty = force_refresh
     # newly_parsed_entries stores only what we changed in this run
     newly_parsed_entries: Dict[str, Any] = {}
 
@@ -322,7 +322,7 @@ def aggregate_usage(
             file_key = str(session_file)
 
             # Optimization: If we only care about recent files and this one is old
-            if since_mtime and mtime < since_mtime:
+            if not force_refresh and since_mtime and mtime < since_mtime:
                 # Still check if we need to add its stats to the return value
                 if file_key in cache and cache[file_key]["mtime"] == mtime:
                     file_stats = cache[file_key]["stats"]
@@ -340,7 +340,11 @@ def aggregate_usage(
                 continue
 
             # Check cache for hits
-            if file_key in cache and cache[file_key]["mtime"] == mtime:
+            if (
+                not force_refresh
+                and file_key in cache
+                and cache[file_key]["mtime"] == mtime
+            ):
                 file_stats = cache[file_key]["stats"]
                 for date_str, models in file_stats.items():
                     if date_filter and date_str not in date_filter:
@@ -784,7 +788,8 @@ def print_summary_statistics(
     print("-" * 30)
 
     gen_header = (
-        f"{'PERIOD':<16} {'DAYS':>5} {'TOKENS':>15} {'FOCUS':>10} {'COST':>12} "
+        f"{'PERIOD':<16} {'DAYS':>5} {'TOKENS':>15} "
+        f"{'FOCUS':>10} {'COST':>12} "
         f"{'AVG TOKENS/D':>15} {'AVG COST/D':>12}"
     )
     print(gen_header)
@@ -852,6 +857,11 @@ def main() -> None:
         "--hours",
         action="store_true",
         help="Show Focus Time (active hours) instead of tokens.",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Force re-scan of all sessions and update cache.",
     )
     parser.add_argument(
         "dir",
@@ -929,7 +939,12 @@ def main() -> None:
                 )
                 sys.exit(1)
 
-    stats = aggregate_usage(args.dir, since_mtime=since_mtime, date_filter=date_filter)
+    stats = aggregate_usage(
+        args.dir,
+        since_mtime=since_mtime,
+        date_filter=date_filter,
+        force_refresh=args.refresh,
+    )
 
     if args.today:
         print_report(

@@ -61,9 +61,11 @@ class UsageTUI:
         self.last_refresh = time.time()
         self.refresh_interval = 30
 
-    def load_data(self) -> None:
+    def load_data(self, force_refresh: bool = False) -> None:
         """Loads usage data and refreshes the view."""
-        self.stats = token_usage.aggregate_usage(self.base_dir)
+        self.stats = token_usage.aggregate_usage(
+            self.base_dir, force_refresh=force_refresh
+        )
         self.last_refresh = time.time()
         self.refresh_view_data()
         self.data_dirty = True
@@ -343,7 +345,7 @@ class UsageTUI:
         if key in [ord("q"), ord("Q")]:
             self.running = False
         elif key in [ord("r"), ord("R")]:
-            self.load_data()
+            self.load_data(force_refresh=True)
             self.table_pad = None
         elif key in [ord("p"), ord("P")]:
             self.edit_pricing(stdscr)
