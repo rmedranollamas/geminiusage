@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -175,6 +176,22 @@ def calculate_cost(
     ) / 1_000_000
 
 
+def format_duration(seconds: float) -> str:
+    """Formats duration in seconds to a concise human-readable string (s, m, h)."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{seconds / 60:.1f}m"
+    return f"{seconds / 3600:.1f}h"
+
+
+def format_duration_h(seconds: float) -> str:
+    """Formats duration in seconds to a human-readable string (m, h) for summary stats."""
+    if seconds < 3600:
+        return f"{seconds / 60:.1f}m"
+    return f"{seconds / 3600:.1f}h"
+
+
 def render_sparkline(values: List[int], width: int = 30) -> str:
     """Renders a simple ASCII sparkline from a list of values."""
     if not values:
@@ -200,6 +217,56 @@ def render_sparkline(values: List[int], width: int = 30) -> str:
             idx = int((v / max_val) * (len(chars) - 1))
             spark += chars[max(1, idx)]
     return spark
+
+
+def discover_session_files(tmp_dir: Path) -> List[Path]:
+    """Discovers Gemini session JSON files in the given directory.
+
+    Args:
+        tmp_dir: Path to search for session files.
+
+    Returns:
+        A list of Path objects for the discovered session files.
+    """
+    import os
+
+    session_files = []
+    try:
+        # Most session files are in ~/.gemini/tmp/<uuid>/chats/session-*.json
+        with os.scandir(str(tmp_dir)) as it:
+            for entry in it:
+                if entry.is_dir():
+                    chats_path = os.path.join(entry.path, "chats")
+                    if os.path.exists(chats_path):
+                        with os.scandir(chats_path) as it_chats:
+                            for f_entry in it_chats:
+                                if (
+                                    f_entry.is_file()
+                                    and f_entry.name.startswith("session-")
+                                    and f_entry.name.endswith(".json")
+                                ):
+                                    session_files.append(Path(f_entry.path))
+                    else:
+                        # Fallback for other structures
+                        with os.scandir(entry.path) as it_uuid:
+                            for f_entry in it_uuid:
+                                if (
+                                    f_entry.is_file()
+                                    and f_entry.name.startswith("session-")
+                                    and f_entry.name.endswith(".json")
+                                ):
+                                    session_files.append(Path(f_entry.path))
+    except (IOError, OSError):
+        pass
+
+    # If no files found with targeted search, do a full walk as fallback
+    if not session_files:
+        for root, _, files in os.walk(str(tmp_dir)):
+            for filename in files:
+                if filename.startswith("session-") and filename.endswith(".json"):
+                    session_files.append(Path(root) / filename)
+
+    return session_files
 
 
 def aggregate_usage(
@@ -243,48 +310,11 @@ def aggregate_usage(
     if not tmp_dir.exists():
         return stats
 
-    import os
-
     cache_dirty = False
     # newly_parsed_entries stores only what we changed in this run
     newly_parsed_entries: Dict[str, Any] = {}
 
-    # Targeted traversal for faster performance
-    session_files = []
-    try:
-        # Most session files are in ~/.gemini/tmp/<uuid>/chats/session-*.json
-        with os.scandir(str(tmp_dir)) as it:
-            for entry in it:
-                if entry.is_dir():
-                    chats_path = os.path.join(entry.path, "chats")
-                    if os.path.exists(chats_path):
-                        with os.scandir(chats_path) as it_chats:
-                            for f_entry in it_chats:
-                                if (
-                                    f_entry.is_file()
-                                    and f_entry.name.startswith("session-")
-                                    and f_entry.name.endswith(".json")
-                                ):
-                                    session_files.append(Path(f_entry.path))
-                    else:
-                        # Fallback for other structures
-                        with os.scandir(entry.path) as it_uuid:
-                            for f_entry in it_uuid:
-                                if (
-                                    f_entry.is_file()
-                                    and f_entry.name.startswith("session-")
-                                    and f_entry.name.endswith(".json")
-                                ):
-                                    session_files.append(Path(f_entry.path))
-    except (IOError, OSError):
-        pass
-
-    # If no files found with targeted search, do a full walk as fallback
-    if not session_files:
-        for root, _, files in os.walk(str(tmp_dir)):
-            for filename in files:
-                if filename.startswith("session-") and filename.endswith(".json"):
-                    session_files.append(Path(root) / filename)
+    session_files = discover_session_files(tmp_dir)
 
     for session_file in session_files:
         try:
@@ -536,6 +566,11 @@ def get_date_range(
         start = end.replace(day=1)
         return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
 
+    if filter_name.startswith("since:"):
+        parts = filter_name.split(":")
+        if len(parts) == 2:
+            return parts[1], today_obj.strftime("%Y-%m-%d")
+
     if ":" in filter_name:
         parts = filter_name.split(":")
         if len(parts) == 2:
@@ -612,13 +647,6 @@ def print_report(
                 grand_total.add(s)
         print(grand_total.total_tokens)
         return
-
-    def format_duration(seconds: float) -> str:
-        if seconds < 60:
-            return f"{seconds:.0f}s"
-        if seconds < 3600:
-            return f"{seconds / 60:.1f}m"
-        return f"{seconds / 3600:.1f}h"
 
     # Header configuration
     model_header = f"{'MODEL':<40} " if show_models else ""
@@ -744,7 +772,9 @@ def print_summary_statistics(
         for i in range(30):
             d = start_date + timedelta(days=i)
             day_stat = daily_totals.get(d, ModelStats())
-            val = int(day_stat.duration_seconds) if show_hours else day_stat.total_tokens
+            val = (
+                int(day_stat.duration_seconds) if show_hours else day_stat.total_tokens
+            )
             spark_values.append(val)
 
         print(f"\nTREND (Last 30 days {'Focus' if show_hours else 'Tokens'})")
@@ -760,11 +790,6 @@ def print_summary_statistics(
     print(gen_header)
     print("-" * len(gen_header))
 
-    def format_duration(seconds: float) -> str:
-        if seconds < 3600:
-            return f"{seconds / 60:.1f}m"
-        return f"{seconds / 3600:.1f}h"
-
     def print_period(label: str, usage_days: List[date]):
         d_count = len(usage_days)
         period_stats = ModelStats()
@@ -774,7 +799,7 @@ def print_summary_statistics(
         t_avg = period_stats.total_tokens / d_count if d_count > 0 else 0
         c_avg = period_stats.cost / d_count if d_count > 0 else 0
         print(
-            f"{label[:16]:<16} {d_count:>5} {period_stats.total_tokens:>15,} {format_duration(period_stats.duration_seconds):>10} ${period_stats.cost:>10.2f} "
+            f"{label[:16]:<16} {d_count:>5} {period_stats.total_tokens:>15,} {format_duration_h(period_stats.duration_seconds):>10} ${period_stats.cost:>10.2f} "
             f"{int(t_avg):>15,} ${c_avg:>10.2f}"
         )
 
@@ -863,63 +888,46 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Determine filter name and calculate date range
+    filter_name = "all"
+    if args.today:
+        filter_name = "today"
+    elif args.yesterday:
+        filter_name = "yesterday"
+    elif args.this_week:
+        filter_name = "this-week"
+    elif args.last_week:
+        filter_name = "last-week"
+    elif args.this_month:
+        filter_name = "this-month"
+    elif args.last_month:
+        filter_name = "last-month"
+    elif args.date_range:
+        filter_name = args.date_range
+    elif args.since:
+        filter_name = f"since:{args.since}"
+
+    start_date, end_date = get_date_range(filter_name)
+
     # Optimization: Calculate since_mtime and date_filter to speed up aggregation
     since_mtime = None
     date_filter = None
 
-    if args.today:
-        today_obj = datetime.now().date()
-        today_str = today_obj.strftime("%Y-%m-%d")
-        date_filter = {today_str}
-        since_mtime = datetime.combine(today_obj, datetime.min.time()).timestamp()
-    elif args.yesterday:
-        yesterday_obj = datetime.now().date() - timedelta(days=1)
-        yesterday_str = yesterday_obj.strftime("%Y-%m-%d")
-        date_filter = {yesterday_str}
-        since_mtime = datetime.combine(yesterday_obj, datetime.min.time()).timestamp()
-    elif args.since:
+    if start_date and end_date:
         try:
-            start_obj = datetime.strptime(args.since, "%Y-%m-%d").date()
-            today_obj = datetime.now().date()
+            start_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
+            end_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
             date_filter = {
                 (start_obj + timedelta(days=i)).strftime("%Y-%m-%d")
-                for i in range((today_obj - start_obj).days + 1)
+                for i in range((end_obj - start_obj).days + 1)
             }
             since_mtime = datetime.combine(start_obj, datetime.min.time()).timestamp()
         except ValueError:
-            print(f"Error: Invalid date format for --since: {args.since}. Use YYYY-MM-DD.")
-            sys.exit(1)
-    elif args.this_week:
-        start_str, end_str = get_date_range("this-week")
-        if start_str and end_str:
-            date_filter = {
-                (
-                    datetime.strptime(start_str, "%Y-%m-%d").date() + timedelta(days=i)
-                ).strftime("%Y-%m-%d")
-                for i in range(
-                    (
-                        datetime.strptime(end_str, "%Y-%m-%d").date()
-                        - datetime.strptime(start_str, "%Y-%m-%d").date()
-                    ).days
-                    + 1
+            if filter_name.startswith("since:"):
+                print(
+                    f"Error: Invalid date format for --since: {args.since}. Use YYYY-MM-DD."
                 )
-            }
-            since_mtime = datetime.strptime(start_str, "%Y-%m-%d").timestamp()
-    elif args.date_range:
-        start_str, end_date_str = get_date_range(args.date_range)
-        if start_str and end_date_str:
-            try:
-                start_obj = datetime.strptime(start_str, "%Y-%m-%d").date()
-                end_obj = datetime.strptime(end_date_str, "%Y-%m-%d").date()
-                date_filter = {
-                    (start_obj + timedelta(days=i)).strftime("%Y-%m-%d")
-                    for i in range((end_obj - start_obj).days + 1)
-                }
-                since_mtime = datetime.combine(
-                    start_obj, datetime.min.time()
-                ).timestamp()
-            except ValueError:
-                pass
+                sys.exit(1)
 
     stats = aggregate_usage(args.dir, since_mtime=since_mtime, date_filter=date_filter)
 
@@ -932,23 +940,6 @@ def main() -> None:
             show_hours=args.hours,
         )
     else:
-        start_date, end_date = None, None
-        if args.yesterday:
-            start_date, end_date = get_date_range("yesterday")
-        elif args.this_week:
-            start_date, end_date = get_date_range("this-week")
-        elif args.last_week:
-            start_date, end_date = get_date_range("last-week")
-        elif args.this_month:
-            start_date, end_date = get_date_range("this-month")
-        elif args.last_month:
-            start_date, end_date = get_date_range("last-month")
-        elif args.date_range:
-            start_date, end_date = get_date_range(args.date_range)
-        elif args.since:
-            start_date = args.since
-            end_date = datetime.now().strftime("%Y-%m-%d")
-
         if start_date and end_date:
             stats = filter_stats(stats, start_date, end_date)
 
@@ -971,10 +962,13 @@ def main() -> None:
                 args.this_month,
                 args.last_month,
                 args.date_range,
+                args.since,
             ]
         )
     ):
-        print_summary_statistics(stats, show_models=args.model, show_hours=args.hours, since_date=args.since)
+        print_summary_statistics(
+            stats, show_models=args.model, show_hours=args.hours, since_date=args.since
+        )
 
 
 if __name__ == "__main__":

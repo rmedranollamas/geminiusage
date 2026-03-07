@@ -150,6 +150,43 @@ class TestTokenUsage(unittest.TestCase):
         self.assertEqual(start, "2026-01-26")
         self.assertEqual(end, "2026-02-01")
 
+        # Since
+        start, end = token_usage.get_date_range("since:2026-01-01", today_obj=today)
+        self.assertEqual(start, "2026-01-01")
+        self.assertEqual(end, "2026-02-05")
+
+    def test_format_duration(self) -> None:
+        """Tests human-readable duration formatting."""
+        self.assertEqual(token_usage.format_duration(45), "45s")
+        self.assertEqual(token_usage.format_duration(120), "2.0m")
+        self.assertEqual(token_usage.format_duration(3600), "1.0h")
+        self.assertEqual(token_usage.format_duration(5400), "1.5h")
+
+        self.assertEqual(token_usage.format_duration_h(120), "2.0m")
+        self.assertEqual(token_usage.format_duration_h(3600), "1.0h")
+
+    def test_discover_session_files(self) -> None:
+        """Tests recursive session file discovery."""
+        with TemporaryDirectory() as tmpdirname:
+            tmp_path = Path(tmpdirname)
+            # Standard structure
+            (tmp_path / "uuid1" / "chats").mkdir(parents=True)
+            f1 = tmp_path / "uuid1" / "chats" / "session-1.json"
+            f1.touch()
+
+            # Flat structure
+            f2 = tmp_path / "uuid2" / "session-2.json"
+            (tmp_path / "uuid2").mkdir(parents=True)
+            f2.touch()
+
+            # Non-session file
+            (tmp_path / "other.txt").touch()
+
+            files = token_usage.discover_session_files(tmp_path)
+            self.assertEqual(len(files), 2)
+            self.assertIn(f1, files)
+            self.assertIn(f2, files)
+
     def test_filter_stats(self) -> None:
         """Tests date-based filtering of stats."""
         stats = {
@@ -164,6 +201,7 @@ class TestTokenUsage(unittest.TestCase):
     def test_since_logic(self) -> None:
         """Verifies the logic used for the --since flag."""
         from datetime import date, timedelta
+
         # Simulated 'since' date
         start_obj = date(2026, 1, 15)
         today_obj = date(2026, 1, 17)

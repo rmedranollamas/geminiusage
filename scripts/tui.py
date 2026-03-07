@@ -69,14 +69,6 @@ class UsageTUI:
         self.data_dirty = True
         self.ui_dirty = True
 
-    def format_duration(self, seconds: float) -> str:
-        """Formats duration in seconds to a human-readable string."""
-        if seconds < 60:
-            return f"{seconds:.0f}s"
-        if seconds < 3600:
-            return f"{seconds / 60:.1f}m"
-        return f"{seconds / 3600:.1f}h"
-
     def refresh_view_data(self) -> None:
         """Processes raw stats into displayable rows and calculates column widths."""
         self.view_rows = []
@@ -115,7 +107,7 @@ class UsageTUI:
                     [
                         day,
                         str(len(day_stats.sessions)),
-                        self.format_duration(day_stats.duration_seconds),
+                        token_usage.format_duration(day_stats.duration_seconds),
                         f"{day_stats.input_tokens:,}",
                         f"{day_stats.cached_tokens:,}",
                         f"{day_stats.output_tokens:,}",
@@ -131,7 +123,7 @@ class UsageTUI:
                             day,
                             model,
                             str(len(s.sessions)),
-                            self.format_duration(s.duration_seconds),
+                            token_usage.format_duration(s.duration_seconds),
                             f"{s.input_tokens:,}",
                             f"{s.cached_tokens:,}",
                             f"{s.output_tokens:,}",
@@ -240,7 +232,7 @@ class UsageTUI:
             parts.append(f"{'':>{self.col_widths[sess_idx]}}")
 
             parts.append(
-                f"{self.format_duration(stats.duration_seconds):>{self.col_widths[focus_idx]}}"
+                f"{token_usage.format_duration(stats.duration_seconds):>{self.col_widths[focus_idx]}}"
             )
             parts.append(f"{stats.input_tokens:>{self.col_widths[input_idx]},}")
             parts.append(f"{stats.cached_tokens:>{self.col_widths[cached_idx]},}")
@@ -537,7 +529,11 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    tui = UsageTUI(base_dir=args.dir, initial_filter=args.since if args.since else "all")
+    initial_filter = "all"
+    if args.since:
+        initial_filter = f"since:{args.since}"
+
+    tui = UsageTUI(base_dir=args.dir, initial_filter=initial_filter)
     curses.wrapper(tui.main_loop)
 
 
