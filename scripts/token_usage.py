@@ -313,11 +313,13 @@ def aggregate_usage(
         newly_parsed: Dict[str, Any] = {}
         dirty = force_refresh
         session_files = discover_session_files(tmp_dir)
+        session_file_keys = set()
 
         for session_file in session_files:
             try:
                 mtime = session_file.stat().st_mtime
                 file_key = str(session_file)
+                session_file_keys.add(file_key)
 
                 # Optimization: If we only care about recent files and this one is old
                 if not force_refresh and since_mtime and mtime < since_mtime:
@@ -462,6 +464,24 @@ def aggregate_usage(
                 }
             except (json.JSONDecodeError, IOError, KeyError):
                 continue
+
+        # Add stats for files that are in the cache but no longer on disk
+        for file_key, cached_data in cache.items():
+            if file_key not in session_file_keys:
+                file_stats = cached_data.get("stats", {})
+                for date_str, models in file_stats.items():
+                    if date_filter and date_str not in date_filter:
+                        continue
+                    for model_name, s in models.items():
+                        m_stats = agg_stats[date_str][model_name]
+                        if "session_id" in s:
+                            m_stats.sessions.add(s["session_id"])
+                        m_stats.input_tokens += s.get("input", 0)
+                        m_stats.cached_tokens += s.get("cached", 0)
+                        m_stats.output_tokens += s.get("output", 0)
+                        m_stats.cost += s.get("cost", 0.0)
+                        m_stats.duration_seconds += s.get("duration", 0.0)
+
         return agg_stats, newly_parsed, dirty
 
     try:

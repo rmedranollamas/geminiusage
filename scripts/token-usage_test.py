@@ -343,6 +343,37 @@ class TestTokenUsage(unittest.TestCase):
             # Check local cache
             self.assertTrue((tmp_path / "usage_cache.json").exists())
 
+    def test_aggregation_keeps_deleted_files(self) -> None:
+        """Verifies that stats are kept for files deleted from disk but present in cache."""
+        with TemporaryDirectory() as tmpdirname:
+            tmp_path = Path(tmpdirname)
+            chat_dir = tmp_path / "chats"
+            chat_dir.mkdir(parents=True)
+
+            session_data = {
+                "sessionId": "test-deleted",
+                "startTime": "2026-01-20T12:00:00Z",
+                "messages": [
+                    {
+                        "type": "gemini",
+                        "model": "gemini-3-flash",
+                        "tokens": {"input": 100},
+                    },
+                ],
+            }
+            session_file = chat_dir / "session-del.json"
+            with session_file.open("w") as f:
+                json.dump(session_data, f)
+
+            stats = token_usage.aggregate_usage(base_dir=tmp_path)
+            self.assertEqual(stats["2026-01-20"]["gemini-3-flash"].input_tokens, 100)
+
+            # Delete the file
+            session_file.unlink()
+
+            # Second run: file is gone, but cache has it
+            stats_cached = token_usage.aggregate_usage(base_dir=tmp_path)
+            self.assertEqual(stats_cached["2026-01-20"]["gemini-3-flash"].input_tokens, 100)
 
 if __name__ == "__main__":
     unittest.main()
