@@ -305,7 +305,7 @@ def aggregate_usage(
 
     def perform_aggregation(
         cache: Dict[str, Any],
-    ) -> Tuple[Dict[str, Dict[str, ModelStats]], Dict[str, Any], bool]:
+    ) -> Tuple[Dict[str, Dict[str, ModelStats]], Dict[str, Any], bool, Set[str]]:
         """Internal helper to perform the actual aggregation logic."""
         agg_stats: Dict[str, Dict[str, ModelStats]] = defaultdict(
             lambda: defaultdict(ModelStats)
@@ -359,17 +359,17 @@ def aggregate_usage(
                     continue
 
                 # Cache miss or stale: parse the file
-                dirty = True
                 with session_file.open("r", encoding="utf-8") as f:
                     data = json.load(f)
 
                 if not isinstance(data, dict):
                     continue
+                dirty = True
 
                 session_id = data.get("sessionId") or session_file.stem
                 raw_start_time = data.get("startTime")
                 start_time = str(raw_start_time) if raw_start_time else ""
-                date_str = start_time.split("T")[0] if "T" in start_time else "unknown"
+                session_date_str = start_time.split("T")[0] if "T" in start_time else "unknown"
 
                 file_record_stats: Dict[str, Dict[str, Any]] = defaultdict(
                     lambda: defaultdict(dict)
@@ -379,6 +379,7 @@ def aggregate_usage(
                 turn_start_ts = None
                 turn_end_ts = None
                 last_model_in_turn = "unknown"
+                last_turn_date_str = session_date_str
 
                 for msg in messages:
                     if not isinstance(msg, dict):
@@ -387,27 +388,31 @@ def aggregate_usage(
                     msg_type = msg.get("type")
                     raw_ts = msg.get("timestamp")
                     ts_val = None
+                    msg_date_str = session_date_str
+
                     if raw_ts:
                         try:
                             ts_val = datetime.fromisoformat(
                                 raw_ts.replace("Z", "+00:00")
                             ).timestamp()
+                            msg_date_str = raw_ts.split("T")[0] if "T" in raw_ts else session_date_str
                         except (ValueError, AttributeError):
                             pass
 
                     if msg_type == "user" and ts_val:
                         if turn_start_ts and turn_end_ts:
-                            agg_stats[date_str][
+                            agg_stats[last_turn_date_str][
                                 last_model_in_turn
                             ].duration_seconds += max(0, turn_end_ts - turn_start_ts)
-                            file_record_stats[date_str][last_model_in_turn][
+                            file_record_stats[last_turn_date_str][last_model_in_turn][
                                 "duration"
-                            ] = file_record_stats[date_str][last_model_in_turn].get(
+                            ] = file_record_stats[last_turn_date_str][last_model_in_turn].get(
                                 "duration", 0.0
                             ) + max(0, turn_end_ts - turn_start_ts)
 
                         turn_start_ts = ts_val
                         turn_end_ts = None
+                        last_turn_date_str = msg_date_str
                         continue
 
                     if msg_type != "gemini":
@@ -430,17 +435,17 @@ def aggregate_usage(
                     cost = calculate_cost(model_name, inp, cache_tokens, out)
                     uncached_inp = max(0, inp - cache_tokens)
 
-                    r_stats = file_record_stats[date_str][model_name]
+                    r_stats = file_record_stats[msg_date_str][model_name]
                     r_stats["session_id"] = session_id
                     r_stats["input"] = r_stats.get("input", 0) + uncached_inp
                     r_stats["cached"] = r_stats.get("cached", 0) + cache_tokens
                     r_stats["output"] = r_stats.get("output", 0) + out
                     r_stats["cost"] = r_stats.get("cost", 0) + cost
 
-                    if date_filter and date_str not in date_filter:
+                    if date_filter and msg_date_str not in date_filter:
                         continue
 
-                    m_stats = agg_stats[date_str][model_name]
+                    m_stats = agg_stats[msg_date_str][model_name]
                     m_stats.sessions.add(session_id)
                     m_stats.input_tokens += uncached_inp
                     m_stats.cached_tokens += cache_tokens
@@ -448,11 +453,11 @@ def aggregate_usage(
                     m_stats.cost += cost
 
                 if turn_start_ts and turn_end_ts:
-                    agg_stats[date_str][last_model_in_turn].duration_seconds += max(
+                    agg_stats[last_turn_date_str][last_model_in_turn].duration_seconds += max(
                         0, turn_end_ts - turn_start_ts
                     )
-                    file_record_stats[date_str][last_model_in_turn]["duration"] = (
-                        file_record_stats[date_str][last_model_in_turn].get(
+                    file_record_stats[last_turn_date_str][last_model_in_turn]["duration"] = (
+                        file_record_stats[last_turn_date_str][last_model_in_turn].get(
                             "duration", 0.0
                         )
                         + max(0, turn_end_ts - turn_start_ts)
@@ -463,6 +468,21 @@ def aggregate_usage(
                     "stats": file_record_stats,
                 }
             except (json.JSONDecodeError, IOError, KeyError):
+                # Fallback to stale cache if file is temporarily unreadable (e.g. during Gemini streaming)
+                if file_key in cache:
+                    file_stats = cache[file_key].get("stats", {})
+                    for date_str, models in file_stats.items():
+                        if date_filter and date_str not in date_filter:
+                            continue
+                        for model_name, s in models.items():
+                            m_stats = agg_stats[date_str][model_name]
+                            if "session_id" in s:
+                                m_stats.sessions.add(s["session_id"])
+                            m_stats.input_tokens += s.get("input", 0)
+                            m_stats.cached_tokens += s.get("cached", 0)
+                            m_stats.output_tokens += s.get("output", 0)
+                            m_stats.cost += s.get("cost", 0.0)
+                            m_stats.duration_seconds += s.get("duration", 0.0)
                 continue
 
         # Add stats for files that are in the cache but no longer on disk
@@ -482,7 +502,7 @@ def aggregate_usage(
                         m_stats.cost += s.get("cost", 0.0)
                         m_stats.duration_seconds += s.get("duration", 0.0)
 
-        return agg_stats, newly_parsed, dirty
+        return agg_stats, newly_parsed, dirty, session_file_keys
 
     try:
         import fcntl
@@ -504,11 +524,12 @@ def aggregate_usage(
                 except (json.JSONDecodeError, IOError):
                     pass
 
-            stats, newly_parsed_entries, cache_dirty = perform_aggregation(
+            stats, newly_parsed_entries, cache_dirty, disk_keys = perform_aggregation(
                 current_cache
             )
 
             if cache_dirty and has_lock:
+                current_cache = {k: v for k, v in current_cache.items() if k in disk_keys}
                 current_cache.update(newly_parsed_entries)
                 import tempfile
 
@@ -523,6 +544,17 @@ def aggregate_usage(
                     if os.path.exists(temp_path):
                         os.unlink(temp_path)
                     raise
+    except PermissionError as e:
+        import sys
+        print(f"Warning: Permission denied for lock file {lock_file_path}: {e}. Cache writing disabled.", file=sys.stderr)
+        current_cache = {}
+        if cache_file.exists() and not force_refresh:
+            try:
+                with cache_file.open("r", encoding="utf-8") as f:
+                    current_cache = json.load(f)
+            except (json.JSONDecodeError, IOError):
+                pass
+        stats, _, _, _ = perform_aggregation(current_cache)
     except (ImportError, IOError, OSError):
         # Fallback for systems without fcntl
         current_cache = {}
@@ -532,11 +564,12 @@ def aggregate_usage(
                     current_cache = json.load(f)
             except (json.JSONDecodeError, IOError):
                 pass
-        stats, newly_parsed_entries, cache_dirty = perform_aggregation(current_cache)
+        stats, newly_parsed_entries, cache_dirty, disk_keys = perform_aggregation(current_cache)
         if cache_dirty:
             try:
                 import tempfile
 
+                current_cache = {k: v for k, v in current_cache.items() if k in disk_keys}
                 current_cache.update(newly_parsed_entries)
                 fd, temp_path = tempfile.mkstemp(
                     dir=str(cache_file.parent), prefix="usage_cache_"

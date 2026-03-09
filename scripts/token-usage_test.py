@@ -104,6 +104,45 @@ class TestTokenUsage(unittest.TestCase):
             cache_file = tmp_path / "usage_cache.json"
             self.assertFalse(cache_file.exists())
 
+    def test_aggregation_permission_error_on_lock(self) -> None:
+        """Verifies that PermissionError on lock file disables cache writing safely."""
+        with TemporaryDirectory() as tmpdirname:
+            tmp_path = Path(tmpdirname)
+            chat_dir = tmp_path / "project1" / "chats"
+            chat_dir.mkdir(parents=True)
+
+            session_data = {
+                "sessionId": "test-session-permission",
+                "startTime": "2026-01-20T12:00:00Z",
+                "messages": [
+                    {
+                        "type": "gemini",
+                        "model": "gemini-3-flash",
+                        "tokens": {"input": 100},
+                    },
+                ],
+            }
+            session_file = chat_dir / "session-1.json"
+            with session_file.open("w") as f:
+                json.dump(session_data, f)
+
+            original_open = Path.open
+            def mock_open_func(self_obj, *args, **kwargs):
+                if self_obj.name.endswith(".lock"):
+                    raise PermissionError("Permission denied")
+                return original_open(self_obj, *args, **kwargs)
+
+            with patch("pathlib.Path.open", autospec=True, side_effect=mock_open_func):
+                stats = token_usage.aggregate_usage(base_dir=tmp_path)
+
+            # Stats should still be parsed from disk correctly
+            self.assertIn("2026-01-20", stats)
+            self.assertEqual(stats["2026-01-20"]["gemini-3-flash"].input_tokens, 100)
+
+            # But the cache file should NOT have been created/written
+            cache_file = tmp_path / "usage_cache.json"
+            self.assertFalse(cache_file.exists())
+
     def test_aggregation_robustness(self) -> None:
         """Verifies that aggregation handles malformed or null-valued JSON fields."""
         with TemporaryDirectory() as tmpdirname:
@@ -374,6 +413,41 @@ class TestTokenUsage(unittest.TestCase):
             # Second run: file is gone, but cache has it
             stats_cached = token_usage.aggregate_usage(base_dir=tmp_path)
             self.assertEqual(stats_cached["2026-01-20"]["gemini-3-flash"].input_tokens, 100)
+
+    def test_multi_day_session(self) -> None:
+        """Verifies that token usage spanning multiple days is attributed correctly."""
+        with TemporaryDirectory() as tmpdirname:
+            tmp_path = Path(tmpdirname)
+            chat_dir = tmp_path / "chats"
+            chat_dir.mkdir(parents=True)
+
+            session_data = {
+                "sessionId": "test-multi-day",
+                "startTime": "2026-01-20T12:00:00Z",
+                "messages": [
+                    {
+                        "type": "gemini",
+                        "model": "gemini-3-flash",
+                        "timestamp": "2026-01-20T12:00:10Z",
+                        "tokens": {"input": 100},
+                    },
+                    {
+                        "type": "gemini",
+                        "model": "gemini-3-flash",
+                        "timestamp": "2026-01-21T12:00:10Z",
+                        "tokens": {"input": 50},
+                    },
+                ],
+            }
+            session_file = chat_dir / "session-1.json"
+            with session_file.open("w") as f:
+                json.dump(session_data, f)
+
+            stats = token_usage.aggregate_usage(base_dir=tmp_path)
+            self.assertIn("2026-01-20", stats)
+            self.assertIn("2026-01-21", stats)
+            self.assertEqual(stats["2026-01-20"]["gemini-3-flash"].input_tokens, 100)
+            self.assertEqual(stats["2026-01-21"]["gemini-3-flash"].input_tokens, 50)
 
 if __name__ == "__main__":
     unittest.main()
