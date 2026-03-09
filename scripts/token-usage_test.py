@@ -256,7 +256,7 @@ class TestTokenUsage(unittest.TestCase):
             # Non-session file
             (tmp_path / "other.txt").touch()
 
-            files = token_usage.discover_session_files(tmp_path)
+            files = token_usage.discover_session_files([tmp_path])
             self.assertEqual(len(files), 2)
             self.assertIn(f1, files)
             self.assertIn(f2, files)

@@ -219,50 +219,58 @@ def render_sparkline(values: List[int], width: int = 30) -> str:
     return spark
 
 
-def discover_session_files(tmp_dir: Path) -> List[Path]:
-    """Discovers Gemini session JSON files in the given directory.
+def discover_session_files(scan_dirs: List[Path]) -> List[Path]:
+    """Discovers Gemini session JSON files in the given directories.
 
     Args:
-        tmp_dir: Path to search for session files.
+        scan_dirs: List of paths to search for session files.
 
     Returns:
         A list of Path objects for the discovered session files.
     """
     session_files = []
-    try:
-        # Most session files are in ~/.gemini/tmp/<uuid>/chats/session-*.json
-        with os.scandir(str(tmp_dir)) as it:
-            for entry in it:
-                if entry.is_dir():
-                    chats_path = os.path.join(entry.path, "chats")
-                    if os.path.exists(chats_path):
-                        with os.scandir(chats_path) as it_chats:
-                            for f_entry in it_chats:
-                                if (
-                                    f_entry.is_file()
-                                    and f_entry.name.startswith("session-")
-                                    and f_entry.name.endswith(".json")
-                                ):
-                                    session_files.append(Path(f_entry.path))
-                    else:
-                        # Fallback for other structures
-                        with os.scandir(entry.path) as it_uuid:
-                            for f_entry in it_uuid:
-                                if (
-                                    f_entry.is_file()
-                                    and f_entry.name.startswith("session-")
-                                    and f_entry.name.endswith(".json")
-                                ):
-                                    session_files.append(Path(f_entry.path))
-    except (IOError, OSError):
-        pass
+    
+    for tmp_dir in scan_dirs:
+        if not tmp_dir.exists():
+            continue
+            
+        dir_files = []
+        try:
+            # Most session files are in ~/.gemini/tmp/<uuid>/chats/session-*.json
+            with os.scandir(str(tmp_dir)) as it:
+                for entry in it:
+                    if entry.is_dir():
+                        chats_path = os.path.join(entry.path, "chats")
+                        if os.path.exists(chats_path):
+                            with os.scandir(chats_path) as it_chats:
+                                for f_entry in it_chats:
+                                    if (
+                                        f_entry.is_file()
+                                        and f_entry.name.startswith("session-")
+                                        and f_entry.name.endswith(".json")
+                                    ):
+                                        dir_files.append(Path(f_entry.path))
+                        else:
+                            # Fallback for other structures
+                            with os.scandir(entry.path) as it_uuid:
+                                for f_entry in it_uuid:
+                                    if (
+                                        f_entry.is_file()
+                                        and f_entry.name.startswith("session-")
+                                        and f_entry.name.endswith(".json")
+                                    ):
+                                        dir_files.append(Path(f_entry.path))
+        except (IOError, OSError):
+            pass
 
-    # If no files found with targeted search, do a full walk as fallback
-    if not session_files:
-        for root, _, files in os.walk(str(tmp_dir)):
-            for filename in files:
-                if filename.startswith("session-") and filename.endswith(".json"):
-                    session_files.append(Path(root) / filename)
+        # If no files found with targeted search, do a full walk as fallback
+        if not dir_files:
+            for root, _, files in os.walk(str(tmp_dir)):
+                for filename in files:
+                    if filename.startswith("session-") and filename.endswith(".json"):
+                        dir_files.append(Path(root) / filename)
+                        
+        session_files.extend(dir_files)
 
     return session_files
 
@@ -277,7 +285,7 @@ def aggregate_usage(
 
     Args:
         base_dir: Optional path to search for session files.
-                 Defaults to ~/.gemini/tmp.
+                 Defaults to ~/.gemini/tmp and ~/.gemini/history.
         since_mtime: Optional float timestamp. If provided, skips aggregating
                     stats for files modified before this time.
         date_filter: Optional set of date strings (YYYY-MM-DD). If provided,
@@ -288,11 +296,11 @@ def aggregate_usage(
         A nested dictionary: stats[date][model] = ModelStats
     """
     if base_dir:
-        tmp_dir = Path(base_dir)
-        cache_file = tmp_dir / "usage_cache.json"
+        scan_dirs = [Path(base_dir)]
+        cache_file = Path(base_dir) / "usage_cache.json"
     else:
         gemini_dir = Path.home() / ".gemini"
-        tmp_dir = gemini_dir / "tmp"
+        scan_dirs = [gemini_dir / "tmp", gemini_dir / "history"]
         cache_file = gemini_dir / "usage_cache.json"
 
     lock_file_path = cache_file.with_suffix(".lock")
@@ -300,7 +308,7 @@ def aggregate_usage(
         lambda: defaultdict(ModelStats)
     )
 
-    if not tmp_dir.exists():
+    if not any(d.exists() for d in scan_dirs):
         return stats
 
     def perform_aggregation(
@@ -312,7 +320,7 @@ def aggregate_usage(
         )
         newly_parsed: Dict[str, Any] = {}
         dirty = force_refresh
-        session_files = discover_session_files(tmp_dir)
+        session_files = discover_session_files(scan_dirs)
         session_file_keys = set()
 
         for session_file in session_files:
