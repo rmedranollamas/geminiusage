@@ -229,11 +229,11 @@ def discover_session_files(scan_dirs: List[Path]) -> List[Path]:
         A list of Path objects for the discovered session files.
     """
     session_files = []
-    
+
     for tmp_dir in scan_dirs:
         if not tmp_dir.exists():
             continue
-            
+
         dir_files = []
         try:
             # Most session files are in ~/.gemini/tmp/<uuid>/chats/session-*.json
@@ -269,7 +269,7 @@ def discover_session_files(scan_dirs: List[Path]) -> List[Path]:
                 for filename in files:
                     if filename.startswith("session-") and filename.endswith(".json"):
                         dir_files.append(Path(root) / filename)
-                        
+
         session_files.extend(dir_files)
 
     return session_files
@@ -313,7 +313,7 @@ def aggregate_usage(
 
     def perform_aggregation(
         cache: Dict[str, Any],
-    ) -> Tuple[Dict[str, Dict[str, ModelStats]], Dict[str, Any], bool, Set[str]]:
+    ) -> Tuple[Dict[str, Dict[str, ModelStats]], Dict[str, Any], bool]:
         """Internal helper to perform the actual aggregation logic."""
         agg_stats: Dict[str, Dict[str, ModelStats]] = defaultdict(
             lambda: defaultdict(ModelStats)
@@ -321,49 +321,20 @@ def aggregate_usage(
         newly_parsed: Dict[str, Any] = {}
         dirty = force_refresh
         session_files = discover_session_files(scan_dirs)
-        session_file_keys = set()
+        session_file_keys = {str(f) for f in session_files}
 
+        # 1. Update cache with new/changed files from disk
         for session_file in session_files:
             try:
                 mtime = session_file.stat().st_mtime
                 file_key = str(session_file)
-                session_file_keys.add(file_key)
 
-                # Optimization: If we only care about recent files and this one is old
-                if not force_refresh and since_mtime and mtime < since_mtime:
-                    if file_key in cache and cache[file_key]["mtime"] == mtime:
-                        file_stats = cache[file_key]["stats"]
-                        for date_str, models in file_stats.items():
-                            if date_filter and date_str not in date_filter:
-                                continue
-                            for model_name, s in models.items():
-                                m_stats = agg_stats[date_str][model_name]
-                                m_stats.sessions.add(s["session_id"])
-                                m_stats.input_tokens += s["input"]
-                                m_stats.cached_tokens += s["cached"]
-                                m_stats.output_tokens += s["output"]
-                                m_stats.cost += s["cost"]
-                                m_stats.duration_seconds += s.get("duration", 0.0)
-                    continue
-
-                # Check cache for hits
+                # Skip if already in cache and same mtime (unless forcing refresh)
                 if (
                     not force_refresh
                     and file_key in cache
                     and cache[file_key]["mtime"] == mtime
                 ):
-                    file_stats = cache[file_key]["stats"]
-                    for date_str, models in file_stats.items():
-                        if date_filter and date_str not in date_filter:
-                            continue
-                        for model_name, s in models.items():
-                            m_stats = agg_stats[date_str][model_name]
-                            m_stats.sessions.add(s["session_id"])
-                            m_stats.input_tokens += s["input"]
-                            m_stats.cached_tokens += s["cached"]
-                            m_stats.output_tokens += s["output"]
-                            m_stats.cost += s["cost"]
-                            m_stats.duration_seconds += s.get("duration", 0.0)
                     continue
 
                 # Cache miss or stale: parse the file
@@ -377,7 +348,9 @@ def aggregate_usage(
                 session_id = data.get("sessionId") or session_file.stem
                 raw_start_time = data.get("startTime")
                 start_time = str(raw_start_time) if raw_start_time else ""
-                session_date_str = start_time.split("T")[0] if "T" in start_time else "unknown"
+                session_date_str = (
+                    start_time.split("T")[0] if "T" in start_time else "unknown"
+                )
 
                 file_record_stats: Dict[str, Dict[str, Any]] = defaultdict(
                     lambda: defaultdict(dict)
@@ -403,20 +376,21 @@ def aggregate_usage(
                             ts_val = datetime.fromisoformat(
                                 raw_ts.replace("Z", "+00:00")
                             ).timestamp()
-                            msg_date_str = raw_ts.split("T")[0] if "T" in raw_ts else session_date_str
+                            msg_date_str = (
+                                raw_ts.split("T")[0]
+                                if "T" in raw_ts
+                                else session_date_str
+                            )
                         except (ValueError, AttributeError):
                             pass
 
                     if msg_type == "user" and ts_val:
                         if turn_start_ts and turn_end_ts:
-                            agg_stats[last_turn_date_str][
-                                last_model_in_turn
-                            ].duration_seconds += max(0, turn_end_ts - turn_start_ts)
                             file_record_stats[last_turn_date_str][last_model_in_turn][
                                 "duration"
-                            ] = file_record_stats[last_turn_date_str][last_model_in_turn].get(
-                                "duration", 0.0
-                            ) + max(0, turn_end_ts - turn_start_ts)
+                            ] = file_record_stats[last_turn_date_str][
+                                last_model_in_turn
+                            ].get("duration", 0.0) + max(0, turn_end_ts - turn_start_ts)
 
                         turn_start_ts = ts_val
                         turn_end_ts = None
@@ -450,67 +424,44 @@ def aggregate_usage(
                     r_stats["output"] = r_stats.get("output", 0) + out
                     r_stats["cost"] = r_stats.get("cost", 0) + cost
 
-                    if date_filter and msg_date_str not in date_filter:
-                        continue
-
-                    m_stats = agg_stats[msg_date_str][model_name]
-                    m_stats.sessions.add(session_id)
-                    m_stats.input_tokens += uncached_inp
-                    m_stats.cached_tokens += cache_tokens
-                    m_stats.output_tokens += out
-                    m_stats.cost += cost
-
                 if turn_start_ts and turn_end_ts:
-                    agg_stats[last_turn_date_str][last_model_in_turn].duration_seconds += max(
-                        0, turn_end_ts - turn_start_ts
-                    )
-                    file_record_stats[last_turn_date_str][last_model_in_turn]["duration"] = (
-                        file_record_stats[last_turn_date_str][last_model_in_turn].get(
-                            "duration", 0.0
-                        )
-                        + max(0, turn_end_ts - turn_start_ts)
-                    )
+                    file_record_stats[last_turn_date_str][last_model_in_turn][
+                        "duration"
+                    ] = file_record_stats[last_turn_date_str][last_model_in_turn].get(
+                        "duration", 0.0
+                    ) + max(0, turn_end_ts - turn_start_ts)
 
                 newly_parsed[file_key] = {
                     "mtime": mtime,
                     "stats": file_record_stats,
                 }
             except (json.JSONDecodeError, IOError, KeyError):
-                # Fallback to stale cache if file is temporarily unreadable (e.g. during Gemini streaming)
-                if file_key in cache:
-                    file_stats = cache[file_key].get("stats", {})
-                    for date_str, models in file_stats.items():
-                        if date_filter and date_str not in date_filter:
-                            continue
-                        for model_name, s in models.items():
-                            m_stats = agg_stats[date_str][model_name]
-                            if "session_id" in s:
-                                m_stats.sessions.add(s["session_id"])
-                            m_stats.input_tokens += s.get("input", 0)
-                            m_stats.cached_tokens += s.get("cached", 0)
-                            m_stats.output_tokens += s.get("output", 0)
-                            m_stats.cost += s.get("cost", 0.0)
-                            m_stats.duration_seconds += s.get("duration", 0.0)
                 continue
 
-        # Add stats for files that are in the cache but no longer on disk
-        for file_key, cached_data in cache.items():
-            if file_key not in session_file_keys:
-                file_stats = cached_data.get("stats", {})
-                for date_str, models in file_stats.items():
-                    if date_filter and date_str not in date_filter:
-                        continue
-                    for model_name, s in models.items():
-                        m_stats = agg_stats[date_str][model_name]
-                        if "session_id" in s:
-                            m_stats.sessions.add(s["session_id"])
-                        m_stats.input_tokens += s.get("input", 0)
-                        m_stats.cached_tokens += s.get("cached", 0)
-                        m_stats.output_tokens += s.get("output", 0)
-                        m_stats.cost += s.get("cost", 0.0)
-                        m_stats.duration_seconds += s.get("duration", 0.0)
+        # Update the local cache object with new findings
+        cache.update(newly_parsed)
 
-        return agg_stats, newly_parsed, dirty, session_file_keys
+        # 2. Build final aggregate from the FULL cache
+        # If force_refresh is True, we only aggregate files currently on disk (pruning the result)
+        for file_key, cached_data in cache.items():
+            if force_refresh and file_key not in session_file_keys:
+                continue
+
+            file_stats = cached_data.get("stats", {})
+            for date_str, models in file_stats.items():
+                if date_filter and date_str not in date_filter:
+                    continue
+                for model_name, s in models.items():
+                    m_stats = agg_stats[date_str][model_name]
+                    if "session_id" in s:
+                        m_stats.sessions.add(s["session_id"])
+                    m_stats.input_tokens += s.get("input", 0)
+                    m_stats.cached_tokens += s.get("cached", 0)
+                    m_stats.output_tokens += s.get("output", 0)
+                    m_stats.cost += s.get("cost", 0.0)
+                    m_stats.duration_seconds += s.get("duration", 0.0)
+
+        return agg_stats, newly_parsed, dirty
 
     try:
         import fcntl
@@ -532,13 +483,22 @@ def aggregate_usage(
                 except (json.JSONDecodeError, IOError):
                     pass
 
-            stats, newly_parsed_entries, cache_dirty, disk_keys = perform_aggregation(
+            stats, newly_parsed_entries, cache_dirty = perform_aggregation(
                 current_cache
             )
 
             if cache_dirty and has_lock:
-                current_cache = {k: v for k, v in current_cache.items() if k in disk_keys}
+                # Merge newly parsed entries back into current_cache
                 current_cache.update(newly_parsed_entries)
+
+                # If force_refresh is True, we PRUNE the disk cache too
+                if force_refresh:
+                    session_files = discover_session_files(scan_dirs)
+                    disk_keys = {str(f) for f in session_files}
+                    current_cache = {
+                        k: v for k, v in current_cache.items() if k in disk_keys
+                    }
+
                 import tempfile
 
                 fd, temp_path = tempfile.mkstemp(
@@ -554,7 +514,11 @@ def aggregate_usage(
                     raise
     except PermissionError as e:
         import sys
-        print(f"Warning: Permission denied for lock file {lock_file_path}: {e}. Cache writing disabled.", file=sys.stderr)
+
+        print(
+            f"Warning: Permission denied for lock file {lock_file_path}: {e}. Cache writing disabled.",
+            file=sys.stderr,
+        )
         current_cache = {}
         if cache_file.exists() and not force_refresh:
             try:
@@ -562,7 +526,7 @@ def aggregate_usage(
                     current_cache = json.load(f)
             except (json.JSONDecodeError, IOError):
                 pass
-        stats, _, _, _ = perform_aggregation(current_cache)
+        stats, _, _ = perform_aggregation(current_cache)
     except (ImportError, IOError, OSError):
         # Fallback for systems without fcntl
         current_cache = {}
@@ -572,12 +536,11 @@ def aggregate_usage(
                     current_cache = json.load(f)
             except (json.JSONDecodeError, IOError):
                 pass
-        stats, newly_parsed_entries, cache_dirty, disk_keys = perform_aggregation(current_cache)
+        stats, newly_parsed_entries, cache_dirty = perform_aggregation(current_cache)
         if cache_dirty:
             try:
                 import tempfile
 
-                current_cache = {k: v for k, v in current_cache.items() if k in disk_keys}
                 current_cache.update(newly_parsed_entries)
                 fd, temp_path = tempfile.mkstemp(
                     dir=str(cache_file.parent), prefix="usage_cache_"
