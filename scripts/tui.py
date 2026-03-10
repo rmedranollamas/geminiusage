@@ -7,7 +7,7 @@ import json
 import os
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -59,6 +59,7 @@ class UsageTUI:
 
         # Auto-refresh settings
         self.last_refresh = time.time()
+        self.last_header_update = 0
         self.refresh_interval = 30
 
     def load_data(self, force_refresh: bool = False) -> None:
@@ -140,7 +141,7 @@ class UsageTUI:
                 "DATE",
                 "MODEL",
                 "SESS",
-                "FOCUS",
+                "ACTIVE",
                 "INPUT",
                 "CACHED",
                 "OUTPUT",
@@ -148,9 +149,17 @@ class UsageTUI:
                 "COST",
             ]
             if self.show_models
-            else ["DATE", "SESS", "FOCUS", "INPUT", "CACHED", "OUTPUT", "TOTAL", "COST"]
+            else [
+                "DATE",
+                "SESS",
+                "ACTIVE",
+                "INPUT",
+                "CACHED",
+                "OUTPUT",
+                "TOTAL",
+                "COST",
+            ]
         )
-
         # Start with header widths
         self.col_widths = [len(h) for h in header]
 
@@ -184,7 +193,7 @@ class UsageTUI:
         header = (
             f" Gemini Token Usage TUI | Filter: [{self.current_filter}] | "
             f"Models: {model_status} | Refresh in {countdown}s | "
-            f"{datetime.now().strftime('%H:%M:%S')} "
+            f"{datetime.now(timezone.utc).strftime('%H:%M:%S UTC')} "
         )
         stdscr.attron(curses.A_REVERSE)
         try:
@@ -220,21 +229,21 @@ class UsageTUI:
         # Robust column indexing based on total number of columns
         def format_total_line(label: str, stats: token_usage.ModelStats) -> str:
             num_cols = len(self.col_widths)
-            # Cost, Total, Output, Cached, Input, Focus are the last 6 columns
+            # Cost, Total, Output, Cached, Input, Active are the last 6 columns
             cost_idx = num_cols - 1
             total_idx = num_cols - 2
             out_idx = num_cols - 3
             cached_idx = num_cols - 4
             input_idx = num_cols - 5
-            focus_idx = num_cols - 6
+            active_idx = num_cols - 6
 
             parts = [f"{label:<{label_col_width}}"]
-            # Skip the 'SESS' column which is before FOCUS
+            # Skip the 'SESS' column which is before ACTIVE
             sess_idx = 2 if self.show_models else 1
             parts.append(f"{'':>{self.col_widths[sess_idx]}}")
 
             parts.append(
-                f"{token_usage.format_duration(stats.duration_seconds):>{self.col_widths[focus_idx]}}"
+                f"{token_usage.format_duration(stats.duration_seconds):>{self.col_widths[active_idx]}}"
             )
             parts.append(f"{stats.input_tokens:>{self.col_widths[input_idx]},}")
             parts.append(f"{stats.cached_tokens:>{self.col_widths[cached_idx]},}")
@@ -396,9 +405,15 @@ class UsageTUI:
 
         while self.running:
             # Check for auto-refresh
-            if time.time() - self.last_refresh >= self.refresh_interval:
+            now_ts = time.time()
+            if now_ts - self.last_refresh >= self.refresh_interval:
                 self.load_data()
                 self.table_pad = None
+
+            # Force UI refresh if a second has passed to update countdown/clock
+            if int(now_ts) > self.last_header_update:
+                self.last_header_update = int(now_ts)
+                self.ui_dirty = True
 
             h, w = stdscr.getmaxyx()
             if h < 10 or w < 40:

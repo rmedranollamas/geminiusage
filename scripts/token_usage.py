@@ -7,7 +7,7 @@ import os
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -219,11 +219,15 @@ def render_sparkline(values: List[int], width: int = 30) -> str:
     return spark
 
 
-def discover_session_files(scan_dirs: List[Path]) -> List[Path]:
+def discover_session_files(
+    scan_dirs: List[Path], since_mtime: Optional[float] = None
+) -> List[Path]:
     """Discovers Gemini session JSON files in the given directories.
 
     Args:
         scan_dirs: List of paths to search for session files.
+        since_mtime: Optional float timestamp. If provided, skips scanning
+                    directories or files modified before this time.
 
     Returns:
         A list of Path objects for the discovered session files.
@@ -234,12 +238,23 @@ def discover_session_files(scan_dirs: List[Path]) -> List[Path]:
         if not tmp_dir.exists():
             continue
 
+        # Optimization: skip directory if its mtime is older than since_mtime
+        if since_mtime and tmp_dir.stat().st_mtime < since_mtime:
+            # We still need to scan subdirectories because a new session might
+            # be inside an old directory structure, but typically Gemini creates
+            # a new UUID directory for new sessions.
+            pass
+
         dir_files = []
         try:
             # Most session files are in ~/.gemini/tmp/<uuid>/chats/session-*.json
             with os.scandir(str(tmp_dir)) as it:
                 for entry in it:
                     if entry.is_dir():
+                        # Skip if directory is older than since_mtime
+                        if since_mtime and entry.stat().st_mtime < since_mtime:
+                            continue
+
                         chats_path = os.path.join(entry.path, "chats")
                         if os.path.exists(chats_path):
                             with os.scandir(chats_path) as it_chats:
@@ -249,7 +264,11 @@ def discover_session_files(scan_dirs: List[Path]) -> List[Path]:
                                         and f_entry.name.startswith("session-")
                                         and f_entry.name.endswith(".json")
                                     ):
-                                        dir_files.append(Path(f_entry.path))
+                                        if (
+                                            not since_mtime
+                                            or f_entry.stat().st_mtime >= since_mtime
+                                        ):
+                                            dir_files.append(Path(f_entry.path))
                         else:
                             # Fallback for other structures
                             with os.scandir(entry.path) as it_uuid:
@@ -259,7 +278,11 @@ def discover_session_files(scan_dirs: List[Path]) -> List[Path]:
                                         and f_entry.name.startswith("session-")
                                         and f_entry.name.endswith(".json")
                                     ):
-                                        dir_files.append(Path(f_entry.path))
+                                        if (
+                                            not since_mtime
+                                            or f_entry.stat().st_mtime >= since_mtime
+                                        ):
+                                            dir_files.append(Path(f_entry.path))
         except (IOError, OSError):
             pass
 
@@ -268,7 +291,9 @@ def discover_session_files(scan_dirs: List[Path]) -> List[Path]:
             for root, _, files in os.walk(str(tmp_dir)):
                 for filename in files:
                     if filename.startswith("session-") and filename.endswith(".json"):
-                        dir_files.append(Path(root) / filename)
+                        f_path = Path(root) / filename
+                        if not since_mtime or f_path.stat().st_mtime >= since_mtime:
+                            dir_files.append(f_path)
 
         session_files.extend(dir_files)
 
@@ -320,7 +345,10 @@ def aggregate_usage(
         )
         newly_parsed: Dict[str, Any] = {}
         dirty = force_refresh
-        session_files = discover_session_files(scan_dirs)
+        # Optimization: only scan files modified after since_mtime
+        # (subtracting a small buffer for safety)
+        discover_since = (since_mtime - 3600) if since_mtime else None
+        session_files = discover_session_files(scan_dirs, since_mtime=discover_since)
         session_file_keys = {str(f) for f in session_files}
 
         # 1. Update cache with new/changed files from disk
@@ -568,7 +596,8 @@ def get_date_range(
         A tuple of (start_date_string, end_date_string) or (None, None).
     """
     if today_obj is None:
-        today_obj = datetime.now().date()
+        # Use UTC for consistency with session JSON timestamps
+        today_obj = datetime.now(timezone.utc).date()
 
     if filter_name == "today":
         return today_obj.strftime("%Y-%m-%d"), today_obj.strftime("%Y-%m-%d")
@@ -654,9 +683,10 @@ def print_report(
         show_models: Whether to show per-model breakdown.
         today_only: Whether to limit the report to today's usage.
         raw_tokens_only: If True, only prints the total token count.
-        show_hours: If True, shows Focus Time instead of tokens.
+        show_hours: If True, shows Active Time instead of tokens.
     """
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    # Use UTC for consistency with session JSON timestamps
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     if today_only:
         stats = {today_str: stats[today_str]} if today_str in stats else {}
@@ -682,7 +712,7 @@ def print_report(
     model_header = f"{'MODEL':<40} " if show_models else ""
     if show_hours:
         header = (
-            f"{'DATE':<12} {model_header}{'SESS':<5} {'FOCUS TIME':>12} {'COST':>10}"
+            f"{'DATE':<12} {model_header}{'SESS':<5} {'ACTIVE TIME':>12} {'COST':>10}"
         )
     else:
         header = (
@@ -771,7 +801,7 @@ def print_summary_statistics(
     if not stats:
         return
 
-    today_obj = datetime.now().date()
+    today_obj = datetime.now(timezone.utc).date()
     # Aggregate daily totals
     daily_totals: Dict[date, ModelStats] = defaultdict(ModelStats)
     model_totals: Dict[str, ModelStats] = defaultdict(ModelStats)
@@ -807,7 +837,7 @@ def print_summary_statistics(
             )
             spark_values.append(val)
 
-        print(f"\nTREND (Last 30 days {'Focus' if show_hours else 'Tokens'})")
+        print(f"\nTREND (Last 30 days {'Active' if show_hours else 'Tokens'})")
         print(f"{render_sparkline(spark_values)}")
 
     print("\nSUMMARY STATISTICS (Averages per usage day)")
@@ -815,7 +845,7 @@ def print_summary_statistics(
 
     gen_header = (
         f"{'PERIOD':<16} {'DAYS':>5} {'TOKENS':>15} "
-        f"{'FOCUS':>10} {'COST':>12} "
+        f"{'ACTIVE':>10} {'COST':>12} "
         f"{'AVG TOKENS/D':>15} {'AVG COST/D':>12}"
     )
     print(gen_header)
@@ -850,7 +880,7 @@ def print_summary_statistics(
         print("-" * 30)
         m_header = (
             f"{'MODEL':<45} {'DAYS':>5} {'TOTAL TOKENS':>15} "
-            f"{'FOCUS':>10} {'AVG TOKENS/D':>15} {'TOTAL COST':>12} {'AVG COST/D':>12}"
+            f"{'ACTIVE':>10} {'AVG TOKENS/D':>15} {'TOTAL COST':>12} {'AVG COST/D':>12}"
         )
         print(m_header)
         print("-" * len(m_header))
@@ -882,7 +912,7 @@ def main() -> None:
     parser.add_argument(
         "--hours",
         action="store_true",
-        help="Show Focus Time (active hours) instead of tokens.",
+        help="Show Active Time (active hours) instead of tokens.",
     )
     parser.add_argument(
         "--refresh",
