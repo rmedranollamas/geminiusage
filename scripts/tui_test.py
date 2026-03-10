@@ -30,8 +30,9 @@ class TestUsageTUI(unittest.TestCase):
     @patch("curses.newwin")
     @patch("curses.curs_set")
     @patch("curses.doupdate")
-    def test_main_loop_rendering(self, mock_doupdate, mock_curs_set, 
-                                mock_newwin, mock_newpad, mock_aggregate) -> None:
+    def test_main_loop_rendering(
+        self, mock_doupdate, mock_curs_set, mock_newwin, mock_newpad, mock_aggregate
+    ) -> None:
         """Verifies that the main loop triggers data loading and rendering calls."""
         # Setup mock data
         mock_aggregate.return_value = {
@@ -41,16 +42,16 @@ class TestUsageTUI(unittest.TestCase):
                 )
             }
         }
-        
+
         # Mock screen
         mock_stdscr = MagicMock()
         mock_stdscr.getmaxyx.return_value = (24, 80)
         # Force loop exit after one iteration
-        mock_stdscr.getch.return_value = ord('q')
-        
+        mock_stdscr.getch.return_value = ord("q")
+
         # Execute
         self.tui.main_loop(mock_stdscr)
-        
+
         # Assertions
         mock_aggregate.assert_called_once()
         mock_newpad.assert_called()
@@ -61,20 +62,21 @@ class TestUsageTUI(unittest.TestCase):
     def test_filter_cycling(self) -> None:
         """Verifies keyboard handling for filter changes."""
         mock_stdscr = MagicMock()
-        
+
         # Open filter menu
-        self.tui.handle_input(ord('f'), mock_stdscr)
+        self.tui.handle_input(ord("f"), mock_stdscr)
         self.assertTrue(self.tui.show_filter_menu)
         self.assertEqual(self.tui.menu_selected, 0)  # Starts at 'all'
-        
+
         # Navigate down to 'today' (idx 1)
         import curses
+
         self.tui.handle_input(curses.KEY_DOWN, mock_stdscr)
         self.assertEqual(self.tui.menu_selected, 1)
 
         # Select it
         self.tui.handle_input(curses.KEY_ENTER, mock_stdscr)
-             
+
         self.assertFalse(self.tui.show_filter_menu)
         self.assertEqual(self.tui.current_filter, "today")
 
@@ -85,14 +87,16 @@ class TestUsageTUI(unittest.TestCase):
         self.tui.stats = {
             "2026-02-05": {
                 "short": token_usage.ModelStats(input_tokens=10),
-                "very-long-model-name-for-testing-alignment": token_usage.ModelStats(input_tokens=100)
+                "very-long-model-name-for-testing-alignment": token_usage.ModelStats(
+                    input_tokens=100
+                ),
             }
         }
         self.tui.show_models = True
         self.tui.refresh_view_data()
-        
+
         # col_widths[1] should be at least length of long model name
-        self.assertGreater(self.tui.col_widths[1], 40)
+        self.assertGreater(self.tui.view_state.col_widths[1], 40)
 
 
 if __name__ == "__main__":

@@ -239,11 +239,14 @@ def discover_session_files(
             continue
 
         # Optimization: skip directory if its mtime is older than since_mtime
-        if since_mtime and tmp_dir.stat().st_mtime < since_mtime:
-            # We still need to scan subdirectories because a new session might
-            # be inside an old directory structure, but typically Gemini creates
-            # a new UUID directory for new sessions.
-            pass
+        try:
+            if since_mtime and tmp_dir.stat().st_mtime < since_mtime:
+                # We still need to scan subdirectories because a new session might
+                # be inside an old directory structure, but typically Gemini creates
+                # a new UUID directory for new sessions.
+                pass
+        except (IOError, OSError):
+            continue
 
         dir_files = []
         try:
@@ -251,38 +254,43 @@ def discover_session_files(
             with os.scandir(str(tmp_dir)) as it:
                 for entry in it:
                     if entry.is_dir():
-                        # Skip if directory is older than since_mtime
-                        if since_mtime and entry.stat().st_mtime < since_mtime:
-                            continue
+                        try:
+                            # Skip if directory is older than since_mtime
+                            if since_mtime and entry.stat().st_mtime < since_mtime:
+                                continue
 
-                        chats_path = os.path.join(entry.path, "chats")
-                        if os.path.exists(chats_path):
-                            with os.scandir(chats_path) as it_chats:
-                                for f_entry in it_chats:
-                                    if (
-                                        f_entry.is_file()
-                                        and f_entry.name.startswith("session-")
-                                        and f_entry.name.endswith(".json")
-                                    ):
+                            chats_path = os.path.join(entry.path, "chats")
+                            if os.path.exists(chats_path):
+                                with os.scandir(chats_path) as it_chats:
+                                    for f_entry in it_chats:
                                         if (
-                                            not since_mtime
-                                            or f_entry.stat().st_mtime >= since_mtime
+                                            f_entry.is_file()
+                                            and f_entry.name.startswith("session-")
+                                            and f_entry.name.endswith(".json")
                                         ):
-                                            dir_files.append(Path(f_entry.path))
-                        else:
-                            # Fallback for other structures
-                            with os.scandir(entry.path) as it_uuid:
-                                for f_entry in it_uuid:
-                                    if (
-                                        f_entry.is_file()
-                                        and f_entry.name.startswith("session-")
-                                        and f_entry.name.endswith(".json")
-                                    ):
+                                            if (
+                                                not since_mtime
+                                                or f_entry.stat().st_mtime
+                                                >= since_mtime
+                                            ):
+                                                dir_files.append(Path(f_entry.path))
+                            else:
+                                # Fallback for other structures
+                                with os.scandir(entry.path) as it_uuid:
+                                    for f_entry in it_uuid:
                                         if (
-                                            not since_mtime
-                                            or f_entry.stat().st_mtime >= since_mtime
+                                            f_entry.is_file()
+                                            and f_entry.name.startswith("session-")
+                                            and f_entry.name.endswith(".json")
                                         ):
-                                            dir_files.append(Path(f_entry.path))
+                                            if (
+                                                not since_mtime
+                                                or f_entry.stat().st_mtime
+                                                >= since_mtime
+                                            ):
+                                                dir_files.append(Path(f_entry.path))
+                        except (IOError, OSError):
+                            continue
         except (IOError, OSError):
             pass
 
@@ -291,9 +299,12 @@ def discover_session_files(
             for root, _, files in os.walk(str(tmp_dir)):
                 for filename in files:
                     if filename.startswith("session-") and filename.endswith(".json"):
-                        f_path = Path(root) / filename
-                        if not since_mtime or f_path.stat().st_mtime >= since_mtime:
-                            dir_files.append(f_path)
+                        try:
+                            f_path = Path(root) / filename
+                            if not since_mtime or f_path.stat().st_mtime >= since_mtime:
+                                dir_files.append(f_path)
+                        except (IOError, OSError):
+                            continue
 
         session_files.extend(dir_files)
 

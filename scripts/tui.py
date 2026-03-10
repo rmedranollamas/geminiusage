@@ -6,12 +6,25 @@ import curses
 import json
 import os
 import subprocess
+import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import token_usage
+
+
+@dataclass
+class ViewState:
+    """Snapshot of processed data for rendering."""
+
+    view_rows: List[List[str]] = field(default_factory=list)
+    view_data: List[Tuple[str, str]] = field(default_factory=list)
+    col_widths: List[int] = field(default_factory=list)
+    totals: token_usage.ModelStats = field(default_factory=token_usage.ModelStats)
+    model_totals: Dict[str, token_usage.ModelStats] = field(default_factory=dict)
 
 
 class UsageTUI:
@@ -33,11 +46,7 @@ class UsageTUI:
         self.running = True
         self.scroll_y = 0
         self.selected_row = 0
-        self.view_rows: List[List[str]] = []
-        self.view_data: List[Tuple[str, Union[str, Tuple[str, str]]]] = []
-        self.col_widths: List[int] = []
-        self.totals = token_usage.ModelStats()
-        self.model_totals: Dict[str, token_usage.ModelStats] = {}
+        self.view_state = ViewState()
         self.filter_options = [
             "all",
             "today",
@@ -57,44 +66,69 @@ class UsageTUI:
         self.data_dirty = True
         self.ui_dirty = True
 
+        # Threading state
+        self.loading = False
+        self.stats_lock = threading.Lock()
+
         # Auto-refresh settings
         self.last_refresh = time.time()
         self.last_header_update = 0
         self.refresh_interval = 30
 
     def load_data(self, force_refresh: bool = False) -> None:
-        """Loads usage data and refreshes the view."""
-        self.stats = token_usage.aggregate_usage(
-            self.base_dir, force_refresh=force_refresh
-        )
-        self.last_refresh = time.time()
-        self.refresh_view_data()
-        self.data_dirty = True
+        """Loads usage data in a background thread."""
+        if self.loading:
+            return
+
+        self.loading = True
         self.ui_dirty = True
+        thread = threading.Thread(
+            target=self._load_data_worker, args=(force_refresh,), daemon=True
+        )
+        thread.start()
 
-    def refresh_view_data(self) -> None:
-        """Processes raw stats into displayable rows and calculates column widths."""
-        self.view_rows = []
-        self.view_data = []
-        self.totals = token_usage.ModelStats()
-        self.model_totals = {}
+    def _load_data_worker(self, force_refresh: bool) -> None:
+        """Background worker for loading data."""
+        try:
+            new_stats = token_usage.aggregate_usage(
+                self.base_dir, force_refresh=force_refresh
+            )
+            with self.stats_lock:
+                self.stats = new_stats
 
-        filtered_stats = self.stats
+            # Post-processing to create a new ViewState
+            new_view_state = self.calculate_view_state()
+
+            with self.stats_lock:
+                self.view_state = new_view_state
+                self.last_refresh = time.time()
+                self.data_dirty = True
+                self.ui_dirty = True
+        finally:
+            self.loading = False
+
+    def calculate_view_state(self) -> ViewState:
+        """Processes raw stats into a new ViewState object."""
+        state = ViewState()
+
+        with self.stats_lock:
+            filtered_stats = self.stats.copy()
+
         if self.current_filter != "all":
             start, end = token_usage.get_date_range(self.current_filter)
             if start and end:
-                filtered_stats = token_usage.filter_stats(self.stats, start, end)
+                filtered_stats = token_usage.filter_stats(filtered_stats, start, end)
 
         # 1. Aggregate totals and model-specific totals
         for day in sorted(filtered_stats.keys(), reverse=True):
             if day == "unknown":
                 continue
             for model, s in filtered_stats[day].items():
-                if model not in self.model_totals:
-                    self.model_totals[model] = token_usage.ModelStats()
+                if model not in state.model_totals:
+                    state.model_totals[model] = token_usage.ModelStats()
 
-                self.model_totals[model].add(s)
-                self.totals.add(s)
+                state.model_totals[model].add(s)
+                state.totals.add(s)
 
         # 2. Build data rows for the main table
         for day in sorted(filtered_stats.keys(), reverse=True):
@@ -106,7 +140,7 @@ class UsageTUI:
                 for s in day_models:
                     day_stats.add(s)
 
-                self.view_rows.append(
+                state.view_rows.append(
                     [
                         day,
                         str(len(day_stats.sessions)),
@@ -121,7 +155,7 @@ class UsageTUI:
             else:
                 for model in sorted(filtered_stats[day].keys()):
                     s = filtered_stats[day][model]
-                    self.view_rows.append(
+                    state.view_rows.append(
                         [
                             day,
                             model,
@@ -161,25 +195,35 @@ class UsageTUI:
             ]
         )
         # Start with header widths
-        self.col_widths = [len(h) for h in header]
+        state.col_widths = [len(h) for h in header]
 
         # Update with data row widths
-        for row in self.view_rows:
+        for row in state.view_rows:
             for i, val in enumerate(row):
-                self.col_widths[i] = max(self.col_widths[i], len(val))
+                state.col_widths[i] = max(state.col_widths[i], len(val))
 
         # Update with potential totals widths
         if self.show_models:
-            for model in self.model_totals:
-                self.col_widths[1] = max(self.col_widths[1], len(f"TOTAL ({model})"))
+            for model in state.model_totals:
+                state.col_widths[1] = max(state.col_widths[1], len(f"TOTAL ({model})"))
 
         # 4. Generate formatted lines
-        for row in self.view_rows:
+        for row in state.view_rows:
             line = ""
             for i, val in enumerate(row):
                 align = "<" if i < (2 if self.show_models else 1) else ">"
-                line += f"{val:{align}{self.col_widths[i]}}  "
-            self.view_data.append((line.rstrip(), row[0]))
+                line += f"{val:{align}{state.col_widths[i]}}  "
+            state.view_data.append((line.rstrip(), row[0]))
+
+        return state
+
+    def refresh_view_data(self) -> None:
+        """Updates the current view state (used for filter/model toggles)."""
+        new_state = self.calculate_view_state()
+        with self.stats_lock:
+            self.view_state = new_state
+            self.data_dirty = True
+            self.ui_dirty = True
 
     def draw_header(self, stdscr: Any) -> None:
         """Draws the top status bar."""
@@ -189,10 +233,11 @@ class UsageTUI:
         # Calculate countdown
         time_since_refresh = time.time() - self.last_refresh
         countdown = max(0, int(self.refresh_interval - time_since_refresh))
+        status_text = "LOADING..." if self.loading else f"Refresh in {countdown}s"
 
         header = (
             f" Gemini Token Usage TUI | Filter: [{self.current_filter}] | "
-            f"Models: {model_status} | Refresh in {countdown}s | "
+            f"Models: {model_status} | {status_text} | "
             f"{datetime.now(timezone.utc).strftime('%H:%M:%S UTC')} "
         )
         stdscr.attron(curses.A_REVERSE)
@@ -208,6 +253,9 @@ class UsageTUI:
         if height < self.MIN_TOTALS_H:
             height = self.MIN_TOTALS_H
 
+        with self.stats_lock:
+            state = self.view_state
+
         if not self.totals_win:
             self.totals_win = curses.newwin(height, w, start_row, 0)
         else:
@@ -221,14 +269,14 @@ class UsageTUI:
         self.totals_win.attroff(curses.A_BOLD)
 
         label_col_width = (
-            self.col_widths[0] + 2 + self.col_widths[1]
+            state.col_widths[0] + 2 + state.col_widths[1]
             if self.show_models
-            else self.col_widths[0]
+            else state.col_widths[0]
         )
 
         # Robust column indexing based on total number of columns
         def format_total_line(label: str, stats: token_usage.ModelStats) -> str:
-            num_cols = len(self.col_widths)
+            num_cols = len(state.col_widths)
             # Cost, Total, Output, Cached, Input, Active are the last 6 columns
             cost_idx = num_cols - 1
             total_idx = num_cols - 2
@@ -240,28 +288,28 @@ class UsageTUI:
             parts = [f"{label:<{label_col_width}}"]
             # Skip the 'SESS' column which is before ACTIVE
             sess_idx = 2 if self.show_models else 1
-            parts.append(f"{'':>{self.col_widths[sess_idx]}}")
+            parts.append(f"{'':>{state.col_widths[sess_idx]}}")
 
             parts.append(
-                f"{token_usage.format_duration(stats.duration_seconds):>{self.col_widths[active_idx]}}"
+                f"{token_usage.format_duration(stats.duration_seconds):>{state.col_widths[active_idx]}}"
             )
-            parts.append(f"{stats.input_tokens:>{self.col_widths[input_idx]},}")
-            parts.append(f"{stats.cached_tokens:>{self.col_widths[cached_idx]},}")
-            parts.append(f"{stats.output_tokens:>{self.col_widths[out_idx]},}")
-            parts.append(f"{stats.total_tokens:>{self.col_widths[total_idx]},}")
+            parts.append(f"{stats.input_tokens:>{state.col_widths[input_idx]},}")
+            parts.append(f"{stats.cached_tokens:>{state.col_widths[cached_idx]},}")
+            parts.append(f"{stats.output_tokens:>{state.col_widths[out_idx]},}")
+            parts.append(f"{stats.total_tokens:>{state.col_widths[total_idx]},}")
 
             cost_str = f"${stats.cost:,.2f}"
-            parts.append(f"{cost_str:>{self.col_widths[cost_idx]}}")
+            parts.append(f"{cost_str:>{state.col_widths[cost_idx]}}")
             return "  ".join(parts)
 
         row_idx = 1
         if self.show_models:
-            sorted_models = sorted(self.model_totals.keys())
+            sorted_models = sorted(state.model_totals.keys())
             for model in sorted_models:
                 if row_idx >= height - 2:
                     break
                 line = format_total_line(
-                    f"TOTAL ({model[:30]})", self.model_totals[model]
+                    f"TOTAL ({model[:30]})", state.model_totals[model]
                 )
                 self.totals_win.addstr(row_idx, 1, line[: w - 2])
                 row_idx += 1
@@ -270,7 +318,7 @@ class UsageTUI:
                 row_idx += 1
 
         if row_idx < height - 1:
-            line = format_total_line("GRAND TOTAL (ALL)", self.totals)
+            line = format_total_line("GRAND TOTAL (ALL)", state.totals)
             self.totals_win.attron(curses.A_BOLD)
             self.totals_win.addstr(row_idx, 1, line[: w - 2])
             self.totals_win.attroff(curses.A_BOLD)
@@ -375,7 +423,9 @@ class UsageTUI:
                 self.selected_row -= 1
                 self.ui_dirty = True
         elif key == curses.KEY_DOWN:
-            if self.selected_row < len(self.view_data) - 1:
+            with self.stats_lock:
+                data_len = len(self.view_state.view_data)
+            if self.selected_row < data_len - 1:
                 self.selected_row += 1
                 self.ui_dirty = True
         elif key == curses.KEY_PPAGE:
@@ -384,7 +434,9 @@ class UsageTUI:
                 self.selected_row = new_row
                 self.ui_dirty = True
         elif key == curses.KEY_NPAGE:
-            new_row = min(len(self.view_data) - 1, self.selected_row + 10)
+            with self.stats_lock:
+                data_len = len(self.view_state.view_data)
+            new_row = min(data_len - 1, self.selected_row + 10)
             if new_row != self.selected_row:
                 self.selected_row = new_row
                 self.ui_dirty = True
@@ -426,9 +478,12 @@ class UsageTUI:
                 continue
 
             # 1. Calculate layout
+            with self.stats_lock:
+                state = self.view_state
+
             totals_h = self.MIN_TOTALS_H
             if self.show_models:
-                totals_h = min(len(self.model_totals) + 4, h // 3)
+                totals_h = min(len(state.model_totals) + 4, h // 3)
 
             table_y_start = 2
             table_y_end = h - totals_h - 2
@@ -465,7 +520,7 @@ class UsageTUI:
                 col_header = ""
                 for i, col in enumerate(header_cols):
                     align = "<" if i < (2 if self.show_models else 1) else ">"
-                    col_header += f"{col:{align}{self.col_widths[i]}}  "
+                    col_header += f"{col:{align}{state.col_widths[i]}}  "
                 try:
                     stdscr.addstr(self.COL_HEADER_Y, 0, col_header[: w - 1])
                 except curses.error:
@@ -474,13 +529,13 @@ class UsageTUI:
                 # 3. Handle pad creation and data rendering
                 if not self.table_pad:
                     self.table_pad = curses.newpad(
-                        max(len(self.view_data) + 1, 100), 256
+                        max(len(state.view_data) + 1, 100), 256
                     )
                     self.data_dirty = True
 
                 if self.data_dirty:
                     self.table_pad.erase()
-                    for i, (line, _) in enumerate(self.view_data):
+                    for i, (line, _) in enumerate(state.view_data):
                         if i == self.selected_row:
                             self.table_pad.attron(curses.A_REVERSE)
                         self.table_pad.addstr(i, 0, line)
@@ -491,7 +546,7 @@ class UsageTUI:
                     # Just update the highlighting if selection changed but data didn't
                     # (This is a simplified optimization, redrawing the whole pad is still better than every loop)
                     self.table_pad.erase()
-                    for i, (line, _) in enumerate(self.view_data):
+                    for i, (line, _) in enumerate(state.view_data):
                         if i == self.selected_row:
                             self.table_pad.attron(curses.A_REVERSE)
                         self.table_pad.addstr(i, 0, line)
