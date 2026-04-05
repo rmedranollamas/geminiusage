@@ -37,7 +37,7 @@ if [[ "$NEEDS_UPDATE" == "true" ]]; then
     # Run the python script and format to millions (e.g., 1.2M)
     # Redirect stderr to /dev/null to keep tmux status clean
     # We use a temporary file for atomic updates
-    TEMP_FILE="${CACHE_FILE}.tmp"
+    TEMP_FILE=$(mktemp "${CACHE_FILE}.XXXXXX")
     TOTAL_TOKENS=$(python3 "$PYTHON_SCRIPT" --today --raw 2>/dev/null)
 
     if [[ -n "$TOTAL_TOKENS" && "$TOTAL_TOKENS" =~ ^[0-9]+$ ]]; then
@@ -49,8 +49,9 @@ if [[ "$NEEDS_UPDATE" == "true" ]]; then
         if [[ ! -f "$CACHE_FILE" ]]; then
             echo "0.0M" > "$CACHE_FILE"
         fi
-        [[ -f "$TEMP_FILE" ]] && rm "$TEMP_FILE"
     fi
+    # Clean up temp file if it still exists (e.g. if mv failed or token check failed)
+    rm -f "$TEMP_FILE"
 fi
 
 if [[ -f "$CACHE_FILE" ]]; then
