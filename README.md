@@ -51,6 +51,17 @@ python3 scripts/tui.py
 python3 scripts/tui.py /path/to/my/sessions
 ```
 
+### Tmux Integration
+
+For a lightweight, cached token counter in your tmux status bar:
+
+```tmux
+# Update every 60s (cached internally)
+set -g status-right 'tokens: #(~/path/to/geminiusage/scripts/tmux_status.sh 60)'
+```
+
+The script caches the result to minimize the overhead of starting the Python interpreter on every status line refresh.
+
 **TUI Shortcuts:**
 
 - `Q`: Quit
