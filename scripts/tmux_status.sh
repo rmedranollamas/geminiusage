@@ -4,7 +4,9 @@
 
 # Default interval: 60 seconds
 INTERVAL=${1:-60}
-CACHE_FILE="/tmp/gemini_usage_cache"
+CACHE_FILE="${HOME}/.gemini/tmux_status.cache"
+# Ensure the directory exists
+mkdir -p "$(dirname "$CACHE_FILE")"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_SCRIPT="$SCRIPT_DIR/token_usage.py"
 
