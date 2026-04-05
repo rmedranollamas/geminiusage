@@ -23,6 +23,10 @@ The project relies exclusively on the Python 3 standard library (no external `pi
   ```bash
   python3 scripts/tui.py [dir]
   ```
+- **Tmux Integration**:
+  ```bash
+  ./scripts/tmux_status.sh [interval_seconds]
+  ```
 - **Run Tests**:
   ```bash
   python3 scripts/token-usage_test.py
