@@ -11,8 +11,9 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
+import antigravity_status as antigravity
 import token_usage
 
 
@@ -25,6 +26,7 @@ class ViewState:
     col_widths: List[int] = field(default_factory=list)
     totals: token_usage.ModelStats = field(default_factory=token_usage.ModelStats)
     model_totals: Dict[str, token_usage.ModelStats] = field(default_factory=dict)
+    antigravity_status: Dict[str, Any] = field(default_factory=dict)
 
 
 class UsageTUI:
@@ -43,10 +45,12 @@ class UsageTUI:
         self.stats: Dict[str, Dict[str, Any]] = {}
         self.current_filter = initial_filter
         self.show_models = False
+        self.show_antigravity = False
         self.running = True
         self.scroll_y = 0
         self.selected_row = 0
-        self.view_state = ViewState()
+        self.stats_lock = threading.Lock()
+        self.view_state = self.calculate_view_state()
         self.filter_options = [
             "all",
             "today",
@@ -62,13 +66,18 @@ class UsageTUI:
         self.show_filter_menu = False
         self.menu_selected = self.filter_options.index(self.current_filter)
         self.table_pad: Optional[Any] = None
+        self.antigravity_pad: Optional[Any] = None
         self.totals_win: Optional[Any] = None
         self.data_dirty = True
         self.ui_dirty = True
+        self.header_dirty = True
+
+        # State tracking for optimized redraws
+        self._last_ag_models_len = 0
+        self._last_ag_selected = -1
 
         # Threading state
         self.loading = False
-        self.stats_lock = threading.Lock()
 
         # Auto-refresh settings
         self.last_refresh = time.time()
@@ -82,6 +91,7 @@ class UsageTUI:
 
         self.loading = True
         self.ui_dirty = True
+        self.header_dirty = True
         thread = threading.Thread(
             target=self._load_data_worker, args=(force_refresh,), daemon=True
         )
@@ -93,17 +103,22 @@ class UsageTUI:
             new_stats = token_usage.aggregate_usage(
                 self.base_dir, force_refresh=force_refresh
             )
+            # Fetch Antigravity status
+            new_antigravity_status = antigravity.get_status()
+
             with self.stats_lock:
                 self.stats = new_stats
 
             # Post-processing to create a new ViewState
             new_view_state = self.calculate_view_state()
+            new_view_state.antigravity_status = new_antigravity_status
 
             with self.stats_lock:
                 self.view_state = new_view_state
                 self.last_refresh = time.time()
                 self.data_dirty = True
                 self.ui_dirty = True
+                self.header_dirty = True
         finally:
             self.loading = False
 
@@ -221,9 +236,11 @@ class UsageTUI:
         """Updates the current view state (used for filter/model toggles)."""
         new_state = self.calculate_view_state()
         with self.stats_lock:
+            new_state.antigravity_status = self.view_state.antigravity_status
             self.view_state = new_state
             self.data_dirty = True
             self.ui_dirty = True
+            self.header_dirty = True
 
     def draw_header(self, stdscr: Any) -> None:
         """Draws the top status bar."""
@@ -346,10 +363,105 @@ class UsageTUI:
 
         win.refresh()
 
+    def draw_antigravity_view(self, stdscr: Any, y_start: int, y_end: int) -> None:
+        """Draws the dedicated Antigravity status view."""
+        h, w = stdscr.getmaxyx()
+        with self.stats_lock:
+            status = self.view_state.antigravity_status
+
+        if not status:
+            stdscr.addstr(y_start, 2, "Status not available yet...")
+            return
+
+        if not status.get("running"):
+            stdscr.addstr(y_start, 2, "Antigravity language server is not running.")
+            return
+
+        if not status.get("connected"):
+            stdscr.addstr(
+                y_start,
+                2,
+                f"Antigravity (PID: {status.get('pid')}) is running but API is not responding.",
+            )
+            return
+
+        if status.get("status_error"):
+            stdscr.addstr(
+                y_start, 2, "Error fetching quota status from Antigravity API."
+            )
+            return
+
+        # Render Header
+        account = status.get("email", "Unknown Account")
+        plan = status.get("plan", "Standard")
+        stdscr.attron(curses.A_BOLD)
+        stdscr.addstr(y_start, 2, f"Antigravity Provider: {account} ({plan})")
+        stdscr.attroff(curses.A_BOLD)
+
+        # Render Table Header
+        table_y = y_start + 2
+        header_line = f"{'MODEL':<25} {'REMAINING':>12}  {'RESET TIME'}"
+        stdscr.addstr(table_y, 2, header_line[: w - 4])
+        stdscr.addstr(table_y + 1, 2, "-" * min(w - 4, 60))
+
+        # Handle pad creation and data rendering for scrolling
+        models = status.get("models", [])
+
+        # Determine if we need to redraw the pad content
+        needs_redraw = (
+            not self.antigravity_pad
+            or self._last_ag_models_len != len(models)
+            or self._last_ag_selected != self.selected_row
+        )
+
+        if not self.antigravity_pad:
+            self.antigravity_pad = curses.newpad(max(len(models) + 1, 100), 256)
+
+        if needs_redraw:
+            self.antigravity_pad.erase()
+            for i, m in enumerate(models):
+                label = m["label"]
+                rem_pct = m["remaining"] * 100
+                reset = m["reset_time"] or "N/A"
+
+                # Draw progress bar
+                bar_w = 10
+                filled = int(rem_pct / 100 * bar_w)
+                bar = "[" + ("=" * filled) + (" " * (bar_w - filled)) + "]"
+
+                color = curses.A_NORMAL
+                if rem_pct < 10:
+                    color = curses.A_BOLD
+
+                if i == self.selected_row:
+                    self.antigravity_pad.attron(curses.A_REVERSE)
+
+                self.antigravity_pad.attron(color)
+                line = f"{label:<25} {rem_pct:>6.1f}% {bar}  {reset}"
+                self.antigravity_pad.addstr(i, 0, line)
+                self.antigravity_pad.attroff(color)
+
+                if i == self.selected_row:
+                    self.antigravity_pad.attroff(curses.A_REVERSE)
+
+            self._last_ag_models_len = len(models)
+            self._last_ag_selected = self.selected_row
+
+        # Refresh pad on screen
+        table_h = y_end - table_y - 2
+        if table_h > 0:
+            # Ensure scroll_y is within bounds
+            max_scroll = max(0, len(models) - table_h)
+            self.scroll_y = min(self.scroll_y, max_scroll)
+
+            self.antigravity_pad.noutrefresh(
+                self.scroll_y, 0, table_y + 2, 2, y_end, w - 1
+            )
+
     def draw_footer(self, stdscr: Any) -> None:
         """Draws the bottom command legend."""
         h, w = stdscr.getmaxyx()
-        footer = " [Q] Quit | [R] Refresh | [M] Models | [F] Filter | [P] Pricing | [UP/DOWN] Select "
+        footer = " [Q] Quit | [R] Refresh | [M] Models | [F] Filter | [P] Pricing | [A] Antigravity | [UP/DOWN] Select "
         stdscr.attron(curses.A_REVERSE)
         try:
             stdscr.addstr(h - 1, 0, footer.ljust(w)[: w - 1])
@@ -394,6 +506,7 @@ class UsageTUI:
                 self.table_pad = None
                 self.data_dirty = True
                 self.ui_dirty = True
+                self.header_dirty = True
             elif key in [27, ord("f"), ord("F")]:
                 self.show_filter_menu = False
                 self.ui_dirty = True
@@ -404,6 +517,7 @@ class UsageTUI:
         elif key in [ord("r"), ord("R")]:
             self.load_data(force_refresh=True)
             self.table_pad = None
+            self.antigravity_pad = None
         elif key in [ord("p"), ord("P")]:
             self.edit_pricing(stdscr)
         elif key in [ord("f"), ord("F")]:
@@ -418,13 +532,24 @@ class UsageTUI:
             self.table_pad = None
             self.data_dirty = True
             self.ui_dirty = True
+            self.header_dirty = True
+        elif key in [ord("a"), ord("A")]:
+            self.show_antigravity = not self.show_antigravity
+            self.selected_row = 0
+            self.scroll_y = 0
+            self.ui_dirty = True
+            self.antigravity_pad = None
+            self.header_dirty = True
         elif key == curses.KEY_UP:
             if self.selected_row > 0:
                 self.selected_row -= 1
                 self.ui_dirty = True
         elif key == curses.KEY_DOWN:
             with self.stats_lock:
-                data_len = len(self.view_state.view_data)
+                if self.show_antigravity:
+                    data_len = len(self.view_state.antigravity_status.get("models", []))
+                else:
+                    data_len = len(self.view_state.view_data)
             if self.selected_row < data_len - 1:
                 self.selected_row += 1
                 self.ui_dirty = True
@@ -435,15 +560,20 @@ class UsageTUI:
                 self.ui_dirty = True
         elif key == curses.KEY_NPAGE:
             with self.stats_lock:
-                data_len = len(self.view_state.view_data)
+                if self.show_antigravity:
+                    data_len = len(self.view_state.antigravity_status.get("models", []))
+                else:
+                    data_len = len(self.view_state.view_data)
             new_row = min(data_len - 1, self.selected_row + 10)
             if new_row != self.selected_row:
                 self.selected_row = new_row
                 self.ui_dirty = True
         elif key == curses.KEY_RESIZE:
             self.table_pad = None
+            self.antigravity_pad = None
             self.totals_win = None
             self.ui_dirty = True
+            self.header_dirty = True
 
     def main_loop(self, stdscr: Any) -> None:
         """Core application loop."""
@@ -497,70 +627,90 @@ class UsageTUI:
                 self.scroll_y = self.selected_row - table_h + 1
                 self.ui_dirty = True
 
-            if self.ui_dirty:
-                stdscr.erase()
+            if self.header_dirty:
                 self.draw_header(stdscr)
                 self.draw_footer(stdscr)
+                stdscr.refresh()
+                self.header_dirty = False
 
-                # 2. Draw static table header
-                header_cols = (
-                    [
-                        "DATE",
-                        "MODEL",
-                        "SESS",
-                        "INPUT",
-                        "CACHED",
-                        "OUTPUT",
-                        "TOTAL",
-                        "COST",
-                    ]
-                    if self.show_models
-                    else ["DATE", "SESS", "INPUT", "CACHED", "OUTPUT", "TOTAL", "COST"]
-                )
-                col_header = ""
-                for i, col in enumerate(header_cols):
-                    align = "<" if i < (2 if self.show_models else 1) else ">"
-                    col_header += f"{col:{align}{state.col_widths[i]}}  "
-                try:
-                    stdscr.addstr(self.COL_HEADER_Y, 0, col_header[: w - 1])
-                except curses.error:
-                    pass
+            if self.ui_dirty:
+                # We don't erase the whole screen to prevent flickering of header/footer
+                # Instead, we just clear the work area
+                for y in range(1, h - 1):
+                    stdscr.move(y, 0)
+                    stdscr.clrtoeol()
 
-                # 3. Handle pad creation and data rendering
-                if not self.table_pad:
-                    self.table_pad = curses.newpad(
-                        max(len(state.view_data) + 1, 100), 256
-                    )
-                    self.data_dirty = True
-
-                if self.data_dirty:
-                    self.table_pad.erase()
-                    for i, (line, _) in enumerate(state.view_data):
-                        if i == self.selected_row:
-                            self.table_pad.attron(curses.A_REVERSE)
-                        self.table_pad.addstr(i, 0, line)
-                        if i == self.selected_row:
-                            self.table_pad.attroff(curses.A_REVERSE)
-                    self.data_dirty = False
+                if self.show_antigravity:
+                    self.draw_antigravity_view(stdscr, 2, h - 2)
                 else:
-                    # Just update the highlighting if selection changed but data didn't
-                    # (This is a simplified optimization, redrawing the whole pad is still better than every loop)
-                    self.table_pad.erase()
-                    for i, (line, _) in enumerate(state.view_data):
-                        if i == self.selected_row:
-                            self.table_pad.attron(curses.A_REVERSE)
-                        self.table_pad.addstr(i, 0, line)
-                        if i == self.selected_row:
-                            self.table_pad.attroff(curses.A_REVERSE)
-
-                # 5. Refresh screen
-                stdscr.noutrefresh()
-                if table_h > 0:
-                    self.table_pad.noutrefresh(
-                        self.scroll_y, 0, table_y_start, 0, table_y_end, w - 1
+                    # 2. Draw static table header
+                    header_cols = (
+                        [
+                            "DATE",
+                            "MODEL",
+                            "SESS",
+                            "ACTIVE",
+                            "INPUT",
+                            "CACHED",
+                            "OUTPUT",
+                            "TOTAL",
+                            "COST",
+                        ]
+                        if self.show_models
+                        else [
+                            "DATE",
+                            "SESS",
+                            "ACTIVE",
+                            "INPUT",
+                            "CACHED",
+                            "OUTPUT",
+                            "TOTAL",
+                            "COST",
+                        ]
                     )
+                    col_header = ""
+                    for i, col in enumerate(header_cols):
+                        align = "<" if i < (2 if self.show_models else 1) else ">"
+                        col_header += f"{col:{align}{state.col_widths[i]}}  "
+                    try:
+                        stdscr.addstr(self.COL_HEADER_Y, 0, col_header[: w - 1])
+                    except curses.error:
+                        pass
 
-                self.draw_totals(stdscr, h - totals_h - 1, totals_h)
+                    # 3. Handle pad creation and data rendering
+                    if not self.table_pad:
+                        self.table_pad = curses.newpad(
+                            max(len(state.view_data) + 1, 100), 256
+                        )
+                        self.data_dirty = True
+
+                    if self.data_dirty:
+                        self.table_pad.erase()
+                        for i, (line, _) in enumerate(state.view_data):
+                            if i == self.selected_row:
+                                self.table_pad.attron(curses.A_REVERSE)
+                            self.table_pad.addstr(i, 0, line)
+                            if i == self.selected_row:
+                                self.table_pad.attroff(curses.A_REVERSE)
+                        self.data_dirty = False
+                    else:
+                        # Just update the highlighting if selection changed but data didn't
+                        self.table_pad.erase()
+                        for i, (line, _) in enumerate(state.view_data):
+                            if i == self.selected_row:
+                                self.table_pad.attron(curses.A_REVERSE)
+                            self.table_pad.addstr(i, 0, line)
+                            if i == self.selected_row:
+                                self.table_pad.attroff(curses.A_REVERSE)
+
+                    # 5. Refresh screen
+                    stdscr.noutrefresh()
+                    if table_h > 0:
+                        self.table_pad.noutrefresh(
+                            self.scroll_y, 0, table_y_start, 0, table_y_end, w - 1
+                        )
+
+                    self.draw_totals(stdscr, h - totals_h - 1, totals_h)
 
                 if self.show_filter_menu:
                     self.draw_filter_menu(stdscr)
