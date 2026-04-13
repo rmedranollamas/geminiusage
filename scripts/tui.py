@@ -115,7 +115,6 @@ class UsageTUI:
                 self.data_dirty = True
                 self.ui_dirty = True
                 self.header_dirty = True
-                self.antigravity_pad = None  # Force redraw of antigravity pad
         finally:
             self.loading = False
 
@@ -403,8 +402,19 @@ class UsageTUI:
 
         # Handle pad creation and data rendering for scrolling
         models = status.get("models", [])
+
+        # Determine if we need to redraw the pad content
+        needs_redraw = (
+            not self.antigravity_pad
+            or getattr(self, "_last_ag_models_len", 0) != len(models)
+            or getattr(self, "_last_ag_selected", -1) != self.selected_row
+        )
+
         if not self.antigravity_pad:
             self.antigravity_pad = curses.newpad(max(len(models) + 1, 100), 256)
+
+        if needs_redraw:
+            self.antigravity_pad.erase()
             for i, m in enumerate(models):
                 label = m["label"]
                 rem_pct = m["remaining"] * 100
@@ -430,9 +440,16 @@ class UsageTUI:
                 if i == self.selected_row:
                     self.antigravity_pad.attroff(curses.A_REVERSE)
 
+            self._last_ag_models_len = len(models)
+            self._last_ag_selected = self.selected_row
+
         # Refresh pad on screen
         table_h = y_end - table_y - 2
         if table_h > 0:
+            # Ensure scroll_y is within bounds
+            max_scroll = max(0, len(models) - table_h)
+            self.scroll_y = min(self.scroll_y, max_scroll)
+
             self.antigravity_pad.noutrefresh(
                 self.scroll_y, 0, table_y + 2, 2, y_end, w - 1
             )
@@ -483,7 +500,6 @@ class UsageTUI:
                 self.scroll_y = 0
                 self.refresh_view_data()
                 self.table_pad = None
-                self.antigravity_pad = None
                 self.data_dirty = True
                 self.ui_dirty = True
                 self.header_dirty = True
@@ -524,8 +540,6 @@ class UsageTUI:
             if self.selected_row > 0:
                 self.selected_row -= 1
                 self.ui_dirty = True
-                if self.show_antigravity:
-                    self.antigravity_pad = None
         elif key == curses.KEY_DOWN:
             with self.stats_lock:
                 if self.show_antigravity:
@@ -535,15 +549,11 @@ class UsageTUI:
             if self.selected_row < data_len - 1:
                 self.selected_row += 1
                 self.ui_dirty = True
-                if self.show_antigravity:
-                    self.antigravity_pad = None
         elif key == curses.KEY_PPAGE:
             new_row = max(0, self.selected_row - 10)
             if new_row != self.selected_row:
                 self.selected_row = new_row
                 self.ui_dirty = True
-                if self.show_antigravity:
-                    self.antigravity_pad = None
         elif key == curses.KEY_NPAGE:
             with self.stats_lock:
                 if self.show_antigravity:
@@ -554,8 +564,6 @@ class UsageTUI:
             if new_row != self.selected_row:
                 self.selected_row = new_row
                 self.ui_dirty = True
-                if self.show_antigravity:
-                    self.antigravity_pad = None
         elif key == curses.KEY_RESIZE:
             self.table_pad = None
             self.antigravity_pad = None
@@ -611,13 +619,9 @@ class UsageTUI:
             if self.selected_row < self.scroll_y:
                 self.scroll_y = self.selected_row
                 self.ui_dirty = True
-                if self.show_antigravity:
-                    self.antigravity_pad = None
             elif self.selected_row >= self.scroll_y + table_h:
                 self.scroll_y = self.selected_row - table_h + 1
                 self.ui_dirty = True
-                if self.show_antigravity:
-                    self.antigravity_pad = None
 
             if self.header_dirty:
                 self.draw_header(stdscr)

@@ -8,6 +8,8 @@ import subprocess
 import urllib.request
 from typing import Any, Dict, List, Optional
 
+# Local HTTPS uses a self-signed cert; allow insecure TLS
+SSL_CONTEXT = ssl._create_unverified_context()
 
 # Mapping Priority and Display Labels
 MODEL_MAPPING = [
@@ -85,9 +87,6 @@ def _probe_connect_port(
         except ValueError:
             pass
 
-    # Local HTTPS uses a self-signed cert; allow insecure TLS
-    ctx = ssl._create_unverified_context()
-
     for port in ports:
         url = f"https://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/GetUnleashData"
         req = urllib.request.Request(
@@ -101,7 +100,9 @@ def _probe_connect_port(
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, context=ctx, timeout=1) as response:
+            with urllib.request.urlopen(
+                req, context=SSL_CONTEXT, timeout=1
+            ) as response:
                 if response.status == 200:
                     return port
         except Exception:
@@ -125,7 +126,6 @@ def get_status() -> Dict[str, Any]:
     if not connect_port:
         return {"running": True, "connected": False, "pid": pid}
 
-    ctx = ssl._create_unverified_context()
     status_data = None
 
     # Primary: GetUserStatus
@@ -148,7 +148,7 @@ def get_status() -> Dict[str, Any]:
             },
             method="POST",
         )
-        with urllib.request.urlopen(req, context=ctx, timeout=2) as response:
+        with urllib.request.urlopen(req, context=SSL_CONTEXT, timeout=2) as response:
             if response.status == 200:
                 status_data = json.loads(response.read().decode("utf-8"))
     except Exception:
@@ -165,7 +165,9 @@ def get_status() -> Dict[str, Any]:
                 },
                 method="POST",
             )
-            with urllib.request.urlopen(req, context=ctx, timeout=2) as response:
+            with urllib.request.urlopen(
+                req, context=SSL_CONTEXT, timeout=2
+            ) as response:
                 if response.status == 200:
                     status_data = json.loads(response.read().decode("utf-8"))
         except Exception:
