@@ -49,7 +49,8 @@ class UsageTUI:
         self.running = True
         self.scroll_y = 0
         self.selected_row = 0
-        self.view_state = ViewState()
+        self.stats_lock = threading.Lock()
+        self.view_state = self.calculate_view_state()
         self.filter_options = [
             "all",
             "today",
@@ -77,7 +78,6 @@ class UsageTUI:
 
         # Threading state
         self.loading = False
-        self.stats_lock = threading.Lock()
 
         # Auto-refresh settings
         self.last_refresh = time.time()
@@ -649,6 +649,7 @@ class UsageTUI:
                             "DATE",
                             "MODEL",
                             "SESS",
+                            "ACTIVE",
                             "INPUT",
                             "CACHED",
                             "OUTPUT",
@@ -659,6 +660,7 @@ class UsageTUI:
                         else [
                             "DATE",
                             "SESS",
+                            "ACTIVE",
                             "INPUT",
                             "CACHED",
                             "OUTPUT",
