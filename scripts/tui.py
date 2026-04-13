@@ -71,6 +71,10 @@ class UsageTUI:
         self.ui_dirty = True
         self.header_dirty = True
 
+        # State tracking for optimized redraws
+        self._last_ag_models_len = 0
+        self._last_ag_selected = -1
+
         # Threading state
         self.loading = False
         self.stats_lock = threading.Lock()
@@ -406,8 +410,8 @@ class UsageTUI:
         # Determine if we need to redraw the pad content
         needs_redraw = (
             not self.antigravity_pad
-            or getattr(self, "_last_ag_models_len", 0) != len(models)
-            or getattr(self, "_last_ag_selected", -1) != self.selected_row
+            or self._last_ag_models_len != len(models)
+            or self._last_ag_selected != self.selected_row
         )
 
         if not self.antigravity_pad:

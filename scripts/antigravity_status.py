@@ -2,13 +2,15 @@
 """Antigravity provider: local LSP probing, port discovery, and quota parsing."""
 
 import json
+import os
 import re
 import ssl
 import subprocess
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-# Local HTTPS uses a self-signed cert; allow insecure TLS
+# Local HTTPS uses a self-signed cert; allow insecure TLS for local communication.
+# This is necessary because the Antigravity language server generates its own certs.
 SSL_CONTEXT = ssl._create_unverified_context()
 
 # Mapping Priority and Display Labels
@@ -21,14 +23,37 @@ MODEL_MAPPING = [
 
 def _find_process() -> Optional[Dict[str, Any]]:
     """Detects the Antigravity language server process and extracts CLI flags."""
+    # Try native /proc on Linux for "Standard Library First" compliance
+    if os.path.exists("/proc"):
+        for pid_dir in os.listdir("/proc"):
+            if not pid_dir.isdigit():
+                continue
+            try:
+                with open(os.path.join("/proc", pid_dir, "cmdline"), "rb") as f:
+                    cmdline = f.read().replace(b"\x00", b" ").decode("utf-8")
+
+                # Match process name and Antigravity markers
+                if "language_server" in cmdline and (
+                    "--app_data_dir antigravity" in cmdline
+                    or "/antigravity/" in cmdline
+                ):
+                    csrf_match = re.search(r"--csrf_token\s+([^\s]+)", cmdline)
+                    csrf_token = csrf_match.group(1) if csrf_match else None
+
+                    port_match = re.search(r"--extension_server_port\s+(\d+)", cmdline)
+                    port = port_match.group(1) if port_match else None
+
+                    return {"pid": pid_dir, "csrf_token": csrf_token, "port": port}
+            except (IOError, OSError, UnicodeDecodeError):
+                continue
+
+    # Fallback to ps for macOS or if /proc is unavailable
     try:
-        # ps -ax -o pid=,command=
         output = subprocess.check_output(
             ["ps", "-ax", "-o", "pid=,command="], stderr=subprocess.DEVNULL
         ).decode("utf-8")
 
         for line in output.splitlines():
-            # Match process name: language_server (macOS/Linux) plus Antigravity markers
             if "language_server" in line and (
                 "--app_data_dir antigravity" in line or "/antigravity/" in line
             ):
@@ -37,15 +62,11 @@ def _find_process() -> Optional[Dict[str, Any]]:
                     continue
                 pid = pid_match.group(1)
 
-                csrf_token = None
                 csrf_match = re.search(r"--csrf_token\s+([^\s]+)", line)
-                if csrf_match:
-                    csrf_token = csrf_match.group(1)
+                csrf_token = csrf_match.group(1) if csrf_match else None
 
-                port = None
                 port_match = re.search(r"--extension_server_port\s+(\d+)", line)
-                if port_match:
-                    port = port_match.group(1)
+                port = port_match.group(1) if port_match else None
 
                 return {"pid": pid, "csrf_token": csrf_token, "port": port}
     except (subprocess.SubprocessError, FileNotFoundError):
@@ -54,10 +75,30 @@ def _find_process() -> Optional[Dict[str, Any]]:
 
 
 def _find_ports(pid: str) -> List[int]:
-    """Finds all listening TCP ports for a given PID using lsof."""
+    """Finds all listening TCP ports for a given PID."""
     ports = []
+
+    # Try native /proc on Linux for "Standard Library First" compliance
+    # We look into /proc/<pid>/net/tcp and /proc/<pid>/fd
+    if os.path.exists(f"/proc/{pid}/net/tcp"):
+        try:
+            with open(f"/proc/{pid}/net/tcp", "r") as f:
+                lines = f.readlines()[1:]  # skip header
+                for line in lines:
+                    parts = line.split()
+                    local_addr = parts[1]
+                    state = parts[3]
+                    # State 0A is LISTEN
+                    if state == "0A":
+                        port_hex = local_addr.split(":")[1]
+                        ports.append(int(port_hex, 16))
+            if ports:
+                return sorted(list(set(ports)))
+        except (IOError, OSError, IndexError, ValueError):
+            pass
+
+    # Fallback to lsof
     try:
-        # lsof -nP -iTCP -sTCP:LISTEN -p <pid>
         output = subprocess.check_output(
             ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-p", pid],
             stderr=subprocess.DEVNULL,
