@@ -238,16 +238,6 @@ def discover_session_files(
         if not tmp_dir.exists():
             continue
 
-        # Optimization: skip directory if its mtime is older than since_mtime
-        try:
-            if since_mtime and tmp_dir.stat().st_mtime < since_mtime:
-                # We still need to scan subdirectories because a new session might
-                # be inside an old directory structure, but typically Gemini creates
-                # a new UUID directory for new sessions.
-                pass
-        except (IOError, OSError):
-            continue
-
         dir_files = []
         try:
             # Most session files are in ~/.gemini/tmp/<uuid>/chats/session-*.json
@@ -255,10 +245,6 @@ def discover_session_files(
                 for entry in it:
                     if entry.is_dir():
                         try:
-                            # Skip if directory is older than since_mtime
-                            if since_mtime and entry.stat().st_mtime < since_mtime:
-                                continue
-
                             chats_path = os.path.join(entry.path, "chats")
                             if os.path.exists(chats_path):
                                 with os.scandir(chats_path) as it_chats:
