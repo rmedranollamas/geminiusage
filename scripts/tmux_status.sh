@@ -57,11 +57,21 @@ if [[ "$NEEDS_UPDATE" == "true" ]]; then
                 # Redirect stderr to /dev/null to keep tmux status clean
                 # We use a temporary file for atomic updates
                 TEMP_FILE=$(mktemp "${CACHE_FILE}.XXXXXX")
-                TOTAL_TOKENS=$(python3 "$PYTHON_SCRIPT" --today --raw 2>/dev/null)
+                TOTAL_OUTPUT=$(python3 "$PYTHON_SCRIPT" --today --raw --agy 2>/dev/null)
 
-                if [[ -n "$TOTAL_TOKENS" && "$TOTAL_TOKENS" =~ ^[0-9]+$ ]]; then
+                if [[ -n "$TOTAL_OUTPUT" ]]; then
+                    # Split into tokens and agy summary
+                    TOTAL_TOKENS=$(echo "$TOTAL_OUTPUT" | cut -d' ' -f1)
+                    AGY_SUMMARY=$(echo "$TOTAL_OUTPUT" | cut -s -d'|' -f2-)
+
                     # Use awk for floating point division and formatting
-                    echo "$TOTAL_TOKENS" | awk '{printf "%.1fM", $1/1000000}' > "$TEMP_FILE"
+                    DISPLAY_STR=$(echo "$TOTAL_TOKENS" | awk '{printf "%.1fM", $1/1000000}')
+                    
+                    if [[ -n "$AGY_SUMMARY" ]]; then
+                        echo "${DISPLAY_STR} |${AGY_SUMMARY}" > "$TEMP_FILE"
+                    else
+                        echo "$DISPLAY_STR" > "$TEMP_FILE"
+                    fi
                     mv "$TEMP_FILE" "$CACHE_FILE"
                 else
                     # If it fails, we keep the old cache if it exists, or write 0.0M

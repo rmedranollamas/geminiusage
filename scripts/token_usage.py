@@ -11,6 +11,18 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+# Add scripts directory to path to allow importing local modules
+sys.path.append(os.path.dirname(__file__))
+
+# Optional Antigravity status module
+antigravity_status: Any = None
+try:
+    import antigravity_status as ag_status
+
+    antigravity_status = ag_status
+except ImportError:
+    pass
+
 
 @dataclass
 class ModelStats:
@@ -152,14 +164,7 @@ def reload_config() -> None:
 def calculate_cost(
     model: str, input_tokens: int, cached_tokens: int, output_tokens: int
 ) -> float:
-    """Calculates cost based on model type and tiered pricing.
-
-    Args:
-        model: The model name.
-        input_tokens: Total prompt tokens (including cached).
-        cached_tokens: Tokens served from cache.
-        output_tokens: Total output/thought tokens.
-    """
+    """Calculates cost based on model type and tiered pricing."""
     pricing = CONFIG.get_pricing(model)
     context_size = input_tokens
 
@@ -220,18 +225,10 @@ def render_sparkline(values: List[int], width: int = 30) -> str:
 
 
 def discover_session_files(
-    scan_dirs: List[Path], since_mtime: Optional[float] = None
+    scan_dirs: List[Path],
+    since_mtime: Optional[float] = None,
 ) -> List[Path]:
-    """Discovers Gemini session JSON files in the given directories.
-
-    Args:
-        scan_dirs: List of paths to search for session files.
-        since_mtime: Optional float timestamp. If provided, skips scanning
-                    directories or files modified before this time.
-
-    Returns:
-        A list of Path objects for the discovered session files.
-    """
+    """Discovers Gemini session JSON files in the given directories."""
     session_files = []
 
     for tmp_dir in scan_dirs:
@@ -240,7 +237,6 @@ def discover_session_files(
 
         dir_files = []
         try:
-            # Most session files are in ~/.gemini/tmp/<uuid>/chats/session-*.json
             with os.scandir(str(tmp_dir)) as it:
                 for entry in it:
                     if entry.is_dir():
@@ -261,7 +257,6 @@ def discover_session_files(
                                             ):
                                                 dir_files.append(Path(f_entry.path))
                             else:
-                                # Fallback for other structures
                                 with os.scandir(entry.path) as it_uuid:
                                     for f_entry in it_uuid:
                                         if (
@@ -280,7 +275,6 @@ def discover_session_files(
         except (IOError, OSError):
             pass
 
-        # If no files found with targeted search, do a full walk as fallback
         if not dir_files:
             for root, _, files in os.walk(str(tmp_dir)):
                 for filename in files:
@@ -303,20 +297,7 @@ def aggregate_usage(
     date_filter: Optional[Set[str]] = None,
     force_refresh: bool = False,
 ) -> Dict[str, Dict[str, ModelStats]]:
-    """Aggregates Gemini token usage from session JSON files.
-
-    Args:
-        base_dir: Optional path to search for session files.
-                 Defaults to ~/.gemini/tmp and ~/.gemini/history.
-        since_mtime: Optional float timestamp. If provided, skips aggregating
-                    stats for files modified before this time.
-        date_filter: Optional set of date strings (YYYY-MM-DD). If provided,
-                    only aggregates stats for these dates.
-        force_refresh: If True, ignores the cache and re-parses all files.
-
-    Returns:
-        A nested dictionary: stats[date][model] = ModelStats
-    """
+    """Aggregates Gemini token usage from session JSON files."""
     if base_dir:
         scan_dirs = [Path(base_dir)]
         cache_file = Path(base_dir) / "usage_cache.json"
@@ -336,25 +317,20 @@ def aggregate_usage(
     def perform_aggregation(
         cache: Dict[str, Any],
     ) -> Tuple[Dict[str, Dict[str, ModelStats]], Dict[str, Any], bool]:
-        """Internal helper to perform the actual aggregation logic."""
         agg_stats: Dict[str, Dict[str, ModelStats]] = defaultdict(
             lambda: defaultdict(ModelStats)
         )
         newly_parsed: Dict[str, Any] = {}
         dirty = force_refresh
-        # Optimization: only scan files modified after since_mtime
-        # (subtracting a small buffer for safety)
         discover_since = (since_mtime - 3600) if since_mtime else None
         session_files = discover_session_files(scan_dirs, since_mtime=discover_since)
         session_file_keys = {str(f) for f in session_files}
 
-        # 1. Update cache with new/changed files from disk
         for session_file in session_files:
             try:
                 mtime = session_file.stat().st_mtime
                 file_key = str(session_file)
 
-                # Skip if already in cache and same mtime (unless forcing refresh)
                 if (
                     not force_refresh
                     and file_key in cache
@@ -362,7 +338,6 @@ def aggregate_usage(
                 ):
                     continue
 
-                # Cache miss or stale: parse the file
                 with session_file.open("r", encoding="utf-8") as f:
                     data = json.load(f)
 
@@ -463,11 +438,8 @@ def aggregate_usage(
             except (json.JSONDecodeError, IOError, KeyError):
                 continue
 
-        # Update the local cache object with new findings
         cache.update(newly_parsed)
 
-        # 2. Build final aggregate from the FULL cache
-        # If force_refresh is True, we only aggregate files currently on disk (pruning the result)
         for file_key, cached_data in cache.items():
             if force_refresh and file_key not in session_file_keys:
                 continue
@@ -493,8 +465,6 @@ def aggregate_usage(
 
         with lock_file_path.open("a+") as lock_f:
             try:
-                # Use non-blocking lock. If another process is writing the cache,
-                # we skip writing to prevent the current process (e.g., tmux) from hanging.
                 fcntl.flock(lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 has_lock = True
             except (BlockingIOError, IOError, OSError):
@@ -513,10 +483,7 @@ def aggregate_usage(
             )
 
             if cache_dirty and has_lock:
-                # Merge newly parsed entries back into current_cache
                 current_cache.update(newly_parsed_entries)
-
-                # If force_refresh is True, we PRUNE the disk cache too
                 if force_refresh:
                     session_files = discover_session_files(scan_dirs)
                     disk_keys = {str(f) for f in session_files}
@@ -538,8 +505,6 @@ def aggregate_usage(
                         os.unlink(temp_path)
                     raise
     except PermissionError as e:
-        import sys
-
         print(
             f"Warning: Permission denied for lock file {lock_file_path}: {e}. Cache writing disabled.",
             file=sys.stderr,
@@ -553,7 +518,6 @@ def aggregate_usage(
                 pass
         stats, _, _ = perform_aggregation(current_cache)
     except (ImportError, IOError, OSError):
-        # Fallback for systems without fcntl
         current_cache = {}
         if cache_file.exists() and not force_refresh:
             try:
@@ -580,28 +544,23 @@ def aggregate_usage(
 
 
 def get_date_range(
-    filter_name: str, today_obj: Optional[date] = None
+    filter_name: str,
+    today_obj: Optional[date] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
-    """Returns (start_date, end_date) strings for a given named filter.
-
-    Args:
-        filter_name: One of 'today', 'yesterday', 'this-week', 'last-week',
-                     'this-month', 'last-month' or 'YYYY-MM-DD:YYYY-MM-DD'.
-        today_obj: Optional date object for testing.
-
-    Returns:
-        A tuple of (start_date_string, end_date_string) or (None, None).
-    """
+    """Returns (start_date, end_date) strings for a given named filter."""
     if today_obj is None:
-        # Use UTC for consistency with session JSON timestamps
-        today_obj = datetime.now(timezone.utc).date()
+        today_obj = datetime.now().date()
+
+    if filter_name == "all":
+        return None, None
 
     if filter_name == "today":
-        return today_obj.strftime("%Y-%m-%d"), today_obj.strftime("%Y-%m-%d")
+        d_str = today_obj.strftime("%Y-%m-%d")
+        return d_str, d_str
 
     if filter_name == "yesterday":
-        yesterday = today_obj - timedelta(days=1)
-        return yesterday.strftime("%Y-%m-%d"), yesterday.strftime("%Y-%m-%d")
+        d_str = (today_obj - timedelta(days=1)).strftime("%Y-%m-%d")
+        return d_str, d_str
 
     if filter_name == "this-week":
         start = today_obj - timedelta(days=today_obj.weekday())
@@ -632,11 +591,8 @@ def get_date_range(
         if len(parts) == 2:
             return parts[0], parts[1]
 
-    # Try to parse as a single date (meaning "since")
     try:
         datetime.strptime(filter_name, "%Y-%m-%d")
-        if today_obj is None:
-            today_obj = datetime.now().date()
         return filter_name, today_obj.strftime("%Y-%m-%d")
     except ValueError:
         pass
@@ -647,16 +603,7 @@ def get_date_range(
 def filter_stats(
     stats: Dict[str, Dict[str, ModelStats]], start_date: str, end_date: str
 ) -> Dict[str, Dict[str, ModelStats]]:
-    """Filters aggregated stats by date range.
-
-    Args:
-        stats: Aggregated stats dictionary.
-        start_date: Start date string (YYYY-MM-DD).
-        end_date: End date string (YYYY-MM-DD).
-
-    Returns:
-        A filtered dictionary of stats.
-    """
+    """Filters aggregated stats by date range."""
     filtered = {}
     for date_str, models in stats.items():
         if date_str == "unknown":
@@ -666,46 +613,63 @@ def filter_stats(
     return filtered
 
 
+def get_antigravity_summary() -> str:
+    """Returns a compact Antigravity status summary."""
+    if not antigravity_status:
+        return ""
+
+    try:
+        status = antigravity_status.get_status()
+        if not status or not status.get("running"):
+            return ""
+
+        if not status.get("connected"):
+            return " | AGY: DISC"
+
+        models = status.get("models", [])
+        if not models:
+            return " | AGY: OK"
+
+        low_model = models[0]
+        rem_pct = int(low_model["remaining"] * 100)
+        return f" | AGY: {low_model['label']} {rem_pct}%"
+    except Exception:
+        return ""
+
+
 def print_report(
     stats: Dict[str, Dict[str, ModelStats]],
     show_models: bool = False,
     today_only: bool = False,
     raw_tokens_only: bool = False,
     show_hours: bool = False,
+    show_antigravity: bool = False,
 ) -> None:
-    """Prints a formatted report of token usage.
-
-    Args:
-        stats: Aggregated stats dictionary.
-        show_models: Whether to show per-model breakdown.
-        today_only: Whether to limit the report to today's usage.
-        raw_tokens_only: If True, only prints the total token count.
-        show_hours: If True, shows Active Time instead of tokens.
-    """
-    # Use UTC for consistency with session JSON timestamps
+    """Prints a formatted report of token usage."""
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     if today_only:
         stats = {today_str: stats[today_str]} if today_str in stats else {}
 
-    if not stats:
-        if raw_tokens_only:
-            print("0")
-        else:
-            print("No usage data found.")
-        return
-
     grand_total = ModelStats()
-    model_grand_totals: Dict[str, ModelStats] = defaultdict(ModelStats)
-
-    if raw_tokens_only:
+    if stats:
         for date_stats in stats.values():
             for s in date_stats.values():
                 grand_total.add(s)
-        print(grand_total.total_tokens)
+
+    if raw_tokens_only:
+        output = str(grand_total.total_tokens)
+        if show_antigravity:
+            output += get_antigravity_summary()
+        print(output)
         return
 
-    # Header configuration
+    if not stats:
+        print("No usage data found.")
+        return
+
+    model_grand_totals: Dict[str, ModelStats] = defaultdict(ModelStats)
+
     model_header = f"{'MODEL':<40} " if show_models else ""
     if show_hours:
         header = (
@@ -720,7 +684,6 @@ def print_report(
     print(header)
     print("-" * line_len)
 
-    # Iteration by date
     for date_str in sorted(stats.keys()):
         display_date = f"{date_str}*" if date_str == today_str else f"{date_str:<11} "
         if not show_models:
@@ -739,8 +702,6 @@ def print_report(
                     f"{day_stats.input_tokens:>12,} {day_stats.cached_tokens:>12,} {day_stats.output_tokens:>12,} "
                     f"{day_stats.total_tokens:>12,} ${day_stats.cost:>8.2f}"
                 )
-
-            grand_total.add(day_stats)
         else:
             for model_name in sorted(stats[date_str].keys()):
                 s = stats[date_str][model_name]
@@ -756,8 +717,6 @@ def print_report(
                         f"{s.cached_tokens:>12,} {s.output_tokens:>12,} "
                         f"{s.total_tokens:>12,} ${s.cost:>8.2f}"
                     )
-
-                grand_total.add(s)
                 model_grand_totals[model_name].add(s)
 
     print("-" * line_len)
@@ -787,6 +746,11 @@ def print_report(
             f"{total_label:<{offset}} {grand_total.total_tokens:>50,} ${grand_total.cost:>8.2f}"
         )
 
+    if show_antigravity:
+        agy_summary = get_antigravity_summary()
+        if agy_summary:
+            print(f"\nAntigravity Status:{agy_summary.replace(' | AGY:', '')}")
+
 
 def print_summary_statistics(
     stats: Dict[str, Dict[str, ModelStats]],
@@ -799,7 +763,6 @@ def print_summary_statistics(
         return
 
     today_obj = datetime.now(timezone.utc).date()
-    # Aggregate daily totals
     daily_totals: Dict[date, ModelStats] = defaultdict(ModelStats)
     model_totals: Dict[str, ModelStats] = defaultdict(ModelStats)
     model_days: Dict[str, Set[date]] = defaultdict(set)
@@ -820,68 +783,38 @@ def print_summary_statistics(
     if not daily_totals:
         return
 
-    all_days = sorted(daily_totals.keys())
+    avg_days = [d for d in daily_totals.keys() if d < today_obj]
+    if not avg_days:
+        avg_days = list(daily_totals.keys())
 
-    if not since_date:
-        # Sparkline (last 30 days)
-        spark_values = []
-        start_date = today_obj - timedelta(days=29)
-        for i in range(30):
-            d = start_date + timedelta(days=i)
-            day_stat = daily_totals.get(d, ModelStats())
-            val = (
-                int(day_stat.duration_seconds) if show_hours else day_stat.total_tokens
-            )
-            spark_values.append(val)
+    num_days = len(avg_days)
+    total_stats = ModelStats()
+    for d in avg_days:
+        total_stats.add(daily_totals[d])
 
-        print(f"\nTREND (Last 30 days {'Active' if show_hours else 'Tokens'})")
-        print(f"{render_sparkline(spark_values)}")
+    avg_tokens = total_stats.total_tokens / num_days if num_days else 0
+    avg_cost = total_stats.cost / num_days if num_days else 0
 
-    print("\nSUMMARY STATISTICS (Averages per usage day)")
-    print("-" * 30)
-
-    gen_header = (
-        f"{'PERIOD':<16} {'DAYS':>5} {'TOKENS':>15} "
-        f"{'ACTIVE':>10} {'COST':>12} "
-        f"{'AVG TOKENS/D':>15} {'AVG COST/D':>12}"
-    )
-    print(gen_header)
-    print("-" * len(gen_header))
-
-    def print_period(label: str, usage_days: List[date]):
-        d_count = len(usage_days)
-        period_stats = ModelStats()
-        for d in usage_days:
-            period_stats.add(daily_totals[d])
-
-        t_avg = period_stats.total_tokens / d_count if d_count > 0 else 0
-        c_avg = period_stats.cost / d_count if d_count > 0 else 0
-        print(
-            f"{label[:16]:<16} {d_count:>5} {period_stats.total_tokens:>15,} {format_duration_h(period_stats.duration_seconds):>10} ${period_stats.cost:>10.2f} "
-            f"{int(t_avg):>15,} ${c_avg:>10.2f}"
-        )
-
+    print("\nSUMMARY STATISTICS")
     if since_date:
-        print_period(f"Since {since_date}", all_days)
+        print(f"Period: Since {since_date} ({len(daily_totals)} days active)")
     else:
-        print_period("All Time", all_days)
+        print(f"Period: All Time ({len(daily_totals)} days active)")
 
-        last_7_cutoff = today_obj - timedelta(days=7)
-        print_period("Last 7 Days", [d for d in all_days if d >= last_7_cutoff])
+    print("-" * 40)
+    if show_hours:
+        avg_hours = total_stats.duration_seconds / num_days if num_days else 0
+        print(f"Daily Average Active Time: {format_duration_h(avg_hours)}")
+    else:
+        print(f"Daily Average Tokens:      {int(avg_tokens):,}")
+    print(f"Daily Average Cost:        ${avg_cost:.2f}")
 
-        last_30_cutoff = today_obj - timedelta(days=30)
-        print_period("Last 30 Days", [d for d in all_days if d >= last_30_cutoff])
-
-    if show_models and model_totals:
-        print("\nSUMMARY BY MODEL")
-        print("-" * 30)
-        m_header = (
-            f"{'MODEL':<45} {'DAYS':>5} {'TOTAL TOKENS':>15} "
-            f"{'ACTIVE':>10} {'AVG TOKENS/D':>15} {'TOTAL COST':>12} {'AVG COST/D':>12}"
+    if show_models:
+        print("\nMODEL BREAKDOWN")
+        print(
+            f"{'MODEL':<45} {'DAYS':>5} {'TOTAL':>15} {'ACTIVE':>10} {'AVG TOK':>15} {'COST':>10} {'AVG COST':>10}"
         )
-        print(m_header)
-        print("-" * len(m_header))
-
+        print("-" * 115)
         for model_name in sorted(model_totals.keys()):
             m_stats = model_totals[model_name]
             days_active = len(model_days[model_name])
@@ -902,6 +835,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--model", action="store_true", help="Show breakdown per model."
+    )
+    parser.add_argument(
+        "--antigravity",
+        "--agy",
+        action="store_true",
+        help="Include Antigravity status summary.",
     )
     parser.add_argument(
         "--raw", action="store_true", help="Print only the raw total token count."
@@ -951,7 +890,6 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Determine filter name and calculate date range
     filter_name = "all"
     if args.today:
         filter_name = "today"
@@ -972,7 +910,6 @@ def main() -> None:
 
     start_date, end_date = get_date_range(filter_name)
 
-    # Optimization: Calculate since_mtime and date_filter to speed up aggregation
     since_mtime = None
     date_filter = None
 
@@ -988,7 +925,8 @@ def main() -> None:
         except ValueError:
             if filter_name.startswith("since:"):
                 print(
-                    f"Error: Invalid date format for --since: {args.since}. Use YYYY-MM-DD."
+                    f"Error: Invalid date format for --since: {args.since}. Use YYYY-MM-DD.",
+                    file=sys.stderr,
                 )
                 sys.exit(1)
 
@@ -1006,6 +944,7 @@ def main() -> None:
             today_only=True,
             raw_tokens_only=args.raw,
             show_hours=args.hours,
+            show_antigravity=args.antigravity,
         )
     else:
         if start_date and end_date:
@@ -1017,6 +956,7 @@ def main() -> None:
             today_only=False,
             raw_tokens_only=args.raw,
             show_hours=args.hours,
+            show_antigravity=args.antigravity,
         )
 
     if (
