@@ -248,7 +248,7 @@ def discover_session_files(
                                         if (
                                             f_entry.is_file()
                                             and f_entry.name.startswith("session-")
-                                            and f_entry.name.endswith(".json")
+                                            and (f_entry.name.endswith(".json") or f_entry.name.endswith(".jsonl"))
                                         ):
                                             if (
                                                 not since_mtime
@@ -262,7 +262,7 @@ def discover_session_files(
                                         if (
                                             f_entry.is_file()
                                             and f_entry.name.startswith("session-")
-                                            and f_entry.name.endswith(".json")
+                                            and (f_entry.name.endswith(".json") or f_entry.name.endswith(".jsonl"))
                                         ):
                                             if (
                                                 not since_mtime
@@ -278,7 +278,7 @@ def discover_session_files(
         if not dir_files:
             for root, _, files in os.walk(str(tmp_dir)):
                 for filename in files:
-                    if filename.startswith("session-") and filename.endswith(".json"):
+                    if filename.startswith("session-") and (filename.endswith(".json") or filename.endswith(".jsonl")):
                         try:
                             f_path = Path(root) / filename
                             if not since_mtime or f_path.stat().st_mtime >= since_mtime:
@@ -338,25 +338,52 @@ def aggregate_usage(
                 ):
                     continue
 
-                with session_file.open("r", encoding="utf-8") as f:
-                    data = json.load(f)
+                if session_file.suffix == ".jsonl":
+                    messages = []
+                    session_id = session_file.stem
+                    session_date_str = "unknown"
+                    with session_file.open("r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                obj = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            
+                            if "$set" in obj:
+                                continue
+                                
+                            if "sessionId" in obj:
+                                session_id = obj.get("sessionId") or session_id
+                                raw_start_time = obj.get("startTime")
+                                start_time = str(raw_start_time) if raw_start_time else ""
+                                session_date_str = (
+                                    start_time.split("T")[0] if "T" in start_time else "unknown"
+                                )
+                            elif "type" in obj:
+                                messages.append(obj)
+                else:
+                    with session_file.open("r", encoding="utf-8") as f:
+                        data = json.load(f)
 
-                if not isinstance(data, dict):
-                    continue
+                    if not isinstance(data, dict):
+                        continue
+
+                    session_id = data.get("sessionId") or session_file.stem
+                    raw_start_time = data.get("startTime")
+                    start_time = str(raw_start_time) if raw_start_time else ""
+                    session_date_str = (
+                        start_time.split("T")[0] if "T" in start_time else "unknown"
+                    )
+                    messages = data.get("messages") or []
+
                 dirty = True
-
-                session_id = data.get("sessionId") or session_file.stem
-                raw_start_time = data.get("startTime")
-                start_time = str(raw_start_time) if raw_start_time else ""
-                session_date_str = (
-                    start_time.split("T")[0] if "T" in start_time else "unknown"
-                )
 
                 file_record_stats: Dict[str, Dict[str, Any]] = defaultdict(
                     lambda: defaultdict(dict)
                 )
-
-                messages = data.get("messages") or []
                 turn_start_ts = None
                 turn_end_ts = None
                 last_model_in_turn = "unknown"
