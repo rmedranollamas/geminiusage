@@ -30,7 +30,7 @@ if [[ ! -f "$CACHE_FILE" ]]; then
 else
     LAST_UPDATE=$($STAT_CMD "$CACHE_FILE" 2>/dev/null || echo 0)
     CURRENT_TIME=$(date +%s)
-    if (( CURRENT_TIME - LAST_UPDATE >= INTERVAL )); then
+    if (( CURRENT_TIME - LAST_UPDATE >= INTERVAL || CURRENT_TIME < LAST_UPDATE )); then
         NEEDS_UPDATE=true
     fi
 fi
@@ -47,7 +47,7 @@ if [[ "$NEEDS_UPDATE" == "true" ]]; then
             else
                 LAST_UPDATE=$($STAT_CMD "$CACHE_FILE" 2>/dev/null || echo 0)
                 CURRENT_TIME=$(date +%s)
-                if (( CURRENT_TIME - LAST_UPDATE >= INTERVAL )); then
+                if (( CURRENT_TIME - LAST_UPDATE >= INTERVAL || CURRENT_TIME < LAST_UPDATE )); then
                     STILL_NEEDS_UPDATE=true
                 fi
             fi
@@ -56,8 +56,8 @@ if [[ "$NEEDS_UPDATE" == "true" ]]; then
                 # Run the python script and format to millions (e.g., 1.2M)
                 # Redirect stderr to /dev/null to keep tmux status clean
                 # We use a temporary file for atomic updates
-                TEMP_FILE=$(mktemp "${CACHE_FILE}.XXXXXX")
-                TOTAL_OUTPUT=$(python3 "$PYTHON_SCRIPT" --today --raw --agy 2>/dev/null)
+                TEMP_FILE=$(mktemp "${CACHE_FILE}.XXXXXX" 2>/dev/null) || TEMP_FILE=""
+                TOTAL_OUTPUT=$(python3 "$PYTHON_SCRIPT" --today --raw --agy --fast-fail 2>/dev/null)
 
                 if [[ -n "$TOTAL_OUTPUT" ]]; then
                     # Split into tokens and agy summary
@@ -67,12 +67,15 @@ if [[ "$NEEDS_UPDATE" == "true" ]]; then
                     # Use awk for floating point division and formatting
                     DISPLAY_STR=$(echo "$TOTAL_TOKENS" | awk '{printf "%.1fM", $1/1000000}')
                     
+                    FINAL_STR="$DISPLAY_STR"
                     if [[ -n "$AGY_SUMMARY" ]]; then
-                        echo "${DISPLAY_STR} |${AGY_SUMMARY}" > "$TEMP_FILE"
-                    else
-                        echo "$DISPLAY_STR" > "$TEMP_FILE"
+                        FINAL_STR="${DISPLAY_STR} |${AGY_SUMMARY}"
                     fi
-                    mv "$TEMP_FILE" "$CACHE_FILE"
+                    
+                    if [[ -n "$TEMP_FILE" ]]; then
+                        echo "$FINAL_STR" > "$TEMP_FILE"
+                        mv "$TEMP_FILE" "$CACHE_FILE"
+                    fi
                 else
                     # If it fails, we keep the old cache if it exists, or write 0.0M
                     if [[ ! -f "$CACHE_FILE" ]]; then
@@ -80,7 +83,9 @@ if [[ "$NEEDS_UPDATE" == "true" ]]; then
                     fi
                 fi
                 # Clean up temp file if it still exists (e.g. if mv failed or token check failed)
-                rm -f "$TEMP_FILE"
+                if [[ -n "$TEMP_FILE" ]]; then
+                    rm -f "$TEMP_FILE"
+                fi
             fi
         fi
     ) 9> "$LOCK_FILE"
