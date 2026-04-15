@@ -5,14 +5,13 @@ import io
 import json
 import os
 import sys
+import time
 import unittest
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-# Add the scripts directory to path to import token_usage
-sys.path.append(os.path.dirname(__file__))
 import token_usage
 
 
@@ -95,7 +94,7 @@ class TestTokenUsage(unittest.TestCase):
 
             # Execution with simulated lock contention
             stats = token_usage.aggregate_usage(base_dir=tmp_path)
-            
+
             # Stats should still be parsed from disk correctly
             self.assertIn("2026-01-20", stats)
             self.assertEqual(stats["2026-01-20"]["gemini-3-flash"].input_tokens, 100)
@@ -127,6 +126,7 @@ class TestTokenUsage(unittest.TestCase):
                 json.dump(session_data, f)
 
             original_open = Path.open
+
             def mock_open_func(self_obj, *args, **kwargs):
                 if self_obj.name.endswith(".lock"):
                     raise PermissionError("Permission denied")
@@ -412,7 +412,9 @@ class TestTokenUsage(unittest.TestCase):
 
             # Second run: file is gone, but cache has it
             stats_cached = token_usage.aggregate_usage(base_dir=tmp_path)
-            self.assertEqual(stats_cached["2026-01-20"]["gemini-3-flash"].input_tokens, 100)
+            self.assertEqual(
+                stats_cached["2026-01-20"]["gemini-3-flash"].input_tokens, 100
+            )
 
     def test_multi_day_session(self) -> None:
         """Verifies that token usage spanning multiple days is attributed correctly."""
@@ -448,6 +450,73 @@ class TestTokenUsage(unittest.TestCase):
             self.assertIn("2026-01-21", stats)
             self.assertEqual(stats["2026-01-20"]["gemini-3-flash"].input_tokens, 100)
             self.assertEqual(stats["2026-01-21"]["gemini-3-flash"].input_tokens, 50)
+
+    def test_aggregation_size_invalidation(self) -> None:
+        """Verifies that cache invalidates correctly when file size changes but mtime remains same."""
+        with TemporaryDirectory() as tmpdirname:
+            tmp_path = Path(tmpdirname)
+            chat_dir = tmp_path / "chats"
+            chat_dir.mkdir(parents=True)
+
+            session_file = chat_dir / "session-append.jsonl"
+
+            # Initial write (need a fake session to establish the date first)
+            init_line = json.dumps(
+                {"sessionId": "test-append", "startTime": "2026-01-20T12:00:00Z"}
+            )
+            line1 = json.dumps(
+                {
+                    "type": "gemini",
+                    "model": "m1",
+                    "tokens": {"input": 10},
+                }
+            )
+            with session_file.open("w") as f:
+                f.write(init_line + "\n")
+                f.write(line1 + "\n")
+
+            # Fix mtime to a specific value
+            fixed_mtime = time.time() - 1000
+            os.utime(session_file, (fixed_mtime, fixed_mtime))
+
+            stats = token_usage.aggregate_usage(base_dir=tmp_path)
+            self.assertEqual(stats["2026-01-20"]["m1"].input_tokens, 10)
+
+            # Append another line, but keep mtime EXACTLY the same
+            line2 = json.dumps(
+                {"type": "gemini", "model": "m1", "tokens": {"input": 20}}
+            )
+            with session_file.open("a") as f:
+                f.write(line2 + "\n")
+
+            os.utime(session_file, (fixed_mtime, fixed_mtime))
+
+            # Re-aggregate, should pick up the new 20 tokens because size changed
+            stats2 = token_usage.aggregate_usage(base_dir=tmp_path)
+            self.assertEqual(stats2["2026-01-20"]["m1"].input_tokens, 30)
+
+    def test_fast_fail_lock(self) -> None:
+        """Verifies that fast_fail flag causes immediate exit if lock cannot be acquired."""
+        with TemporaryDirectory() as tmpdirname:
+            tmp_path = Path(tmpdirname)
+            lock_file = tmp_path / "usage_cache.lock"
+
+            # Pre-acquire the lock from another process context
+            import fcntl
+
+            lock_f = lock_file.open("a+")
+            fcntl.flock(lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            try:
+                # Should exit with code 2
+                with self.assertRaises(SystemExit) as cm:
+                    token_usage.aggregate_usage(base_dir=tmp_path, fast_fail=True)
+
+                self.assertEqual(cm.exception.code, 2)
+            finally:
+                fcntl.flock(lock_f, fcntl.LOCK_UN)
+                lock_f.close()
+
 
 if __name__ == "__main__":
     unittest.main()

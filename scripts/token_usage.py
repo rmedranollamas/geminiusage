@@ -248,7 +248,10 @@ def discover_session_files(
                                         if (
                                             f_entry.is_file()
                                             and f_entry.name.startswith("session-")
-                                            and (f_entry.name.endswith(".json") or f_entry.name.endswith(".jsonl"))
+                                            and (
+                                                f_entry.name.endswith(".json")
+                                                or f_entry.name.endswith(".jsonl")
+                                            )
                                         ):
                                             if (
                                                 not since_mtime
@@ -262,7 +265,10 @@ def discover_session_files(
                                         if (
                                             f_entry.is_file()
                                             and f_entry.name.startswith("session-")
-                                            and (f_entry.name.endswith(".json") or f_entry.name.endswith(".jsonl"))
+                                            and (
+                                                f_entry.name.endswith(".json")
+                                                or f_entry.name.endswith(".jsonl")
+                                            )
                                         ):
                                             if (
                                                 not since_mtime
@@ -278,7 +284,9 @@ def discover_session_files(
         if not dir_files:
             for root, _, files in os.walk(str(tmp_dir)):
                 for filename in files:
-                    if filename.startswith("session-") and (filename.endswith(".json") or filename.endswith(".jsonl")):
+                    if filename.startswith("session-") and (
+                        filename.endswith(".json") or filename.endswith(".jsonl")
+                    ):
                         try:
                             f_path = Path(root) / filename
                             if not since_mtime or f_path.stat().st_mtime >= since_mtime:
@@ -296,6 +304,7 @@ def aggregate_usage(
     since_mtime: Optional[float] = None,
     date_filter: Optional[Set[str]] = None,
     force_refresh: bool = False,
+    fast_fail: bool = False,
 ) -> Dict[str, Dict[str, ModelStats]]:
     """Aggregates Gemini token usage from session JSON files."""
     if base_dir:
@@ -328,13 +337,16 @@ def aggregate_usage(
 
         for session_file in session_files:
             try:
-                mtime = session_file.stat().st_mtime
+                stat = session_file.stat()
+                mtime = stat.st_mtime
+                size = stat.st_size
                 file_key = str(session_file)
 
                 if (
                     not force_refresh
                     and file_key in cache
-                    and cache[file_key]["mtime"] == mtime
+                    and cache[file_key].get("mtime") == mtime
+                    and cache[file_key].get("size") == size
                 ):
                     continue
 
@@ -351,16 +363,20 @@ def aggregate_usage(
                                 obj = json.loads(line)
                             except json.JSONDecodeError:
                                 continue
-                            
+
                             if "$set" in obj:
                                 continue
-                                
+
                             if "sessionId" in obj:
                                 session_id = obj.get("sessionId") or session_id
                                 raw_start_time = obj.get("startTime")
-                                start_time = str(raw_start_time) if raw_start_time else ""
+                                start_time = (
+                                    str(raw_start_time) if raw_start_time else ""
+                                )
                                 session_date_str = (
-                                    start_time.split("T")[0] if "T" in start_time else "unknown"
+                                    start_time.split("T")[0]
+                                    if "T" in start_time
+                                    else "unknown"
                                 )
                             elif "type" in obj:
                                 messages.append(obj)
@@ -460,6 +476,7 @@ def aggregate_usage(
 
                 newly_parsed[file_key] = {
                     "mtime": mtime,
+                    "size": size,
                     "stats": file_record_stats,
                 }
             except (json.JSONDecodeError, IOError, KeyError):
@@ -487,6 +504,7 @@ def aggregate_usage(
 
         return agg_stats, newly_parsed, dirty
 
+    stats = None
     try:
         import fcntl
 
@@ -496,6 +514,8 @@ def aggregate_usage(
                 has_lock = True
             except (BlockingIOError, IOError, OSError):
                 has_lock = False
+                if fast_fail:
+                    sys.exit(2)
 
             current_cache = {}
             if cache_file.exists():
@@ -536,36 +556,44 @@ def aggregate_usage(
             f"Warning: Permission denied for lock file {lock_file_path}: {e}. Cache writing disabled.",
             file=sys.stderr,
         )
-        current_cache = {}
-        if cache_file.exists() and not force_refresh:
-            try:
-                with cache_file.open("r", encoding="utf-8") as f:
-                    current_cache = json.load(f)
-            except (json.JSONDecodeError, IOError):
-                pass
-        stats, _, _ = perform_aggregation(current_cache)
+        if fast_fail:
+            sys.exit(2)
+        if stats is None:
+            current_cache = {}
+            if cache_file.exists() and not force_refresh:
+                try:
+                    with cache_file.open("r", encoding="utf-8") as f:
+                        current_cache = json.load(f)
+                except (json.JSONDecodeError, IOError):
+                    pass
+            stats, _, _ = perform_aggregation(current_cache)
     except (ImportError, IOError, OSError):
-        current_cache = {}
-        if cache_file.exists() and not force_refresh:
-            try:
-                with cache_file.open("r", encoding="utf-8") as f:
-                    current_cache = json.load(f)
-            except (json.JSONDecodeError, IOError):
-                pass
-        stats, newly_parsed_entries, cache_dirty = perform_aggregation(current_cache)
-        if cache_dirty:
-            try:
-                import tempfile
+        if fast_fail and stats is None:
+            sys.exit(2)
+        if stats is None:
+            current_cache = {}
+            if cache_file.exists() and not force_refresh:
+                try:
+                    with cache_file.open("r", encoding="utf-8") as f:
+                        current_cache = json.load(f)
+                except (json.JSONDecodeError, IOError):
+                    pass
+            stats, newly_parsed_entries, cache_dirty = perform_aggregation(
+                current_cache
+            )
+            if cache_dirty:
+                try:
+                    import tempfile
 
-                current_cache.update(newly_parsed_entries)
-                fd, temp_path = tempfile.mkstemp(
-                    dir=str(cache_file.parent), prefix="usage_cache_"
-                )
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(current_cache, f)
-                os.replace(temp_path, str(cache_file))
-            except (IOError, OSError, TypeError, NameError):
-                pass
+                    current_cache.update(newly_parsed_entries)
+                    fd, temp_path = tempfile.mkstemp(
+                        dir=str(cache_file.parent), prefix="usage_cache_"
+                    )
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        json.dump(current_cache, f)
+                    os.replace(temp_path, str(cache_file))
+                except (IOError, OSError, TypeError, NameError):
+                    pass
 
     return stats
 
@@ -883,6 +911,11 @@ def main() -> None:
         help="Force re-scan of all sessions and update cache.",
     )
     parser.add_argument(
+        "--fast-fail",
+        action="store_true",
+        help="Exit immediately if cache lock is held by another process.",
+    )
+    parser.add_argument(
         "dir",
         nargs="?",
         default=None,
@@ -962,6 +995,7 @@ def main() -> None:
         since_mtime=since_mtime,
         date_filter=date_filter,
         force_refresh=args.refresh,
+        fast_fail=args.fast_fail,
     )
 
     if args.today:
