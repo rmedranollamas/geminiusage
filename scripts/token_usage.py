@@ -504,6 +504,7 @@ def aggregate_usage(
 
         return agg_stats, newly_parsed, dirty
 
+    can_write_cache = True
     stats = None
     try:
         import fcntl
@@ -512,10 +513,12 @@ def aggregate_usage(
             try:
                 fcntl.flock(lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 has_lock = True
-            except (BlockingIOError, IOError, OSError):
+            except BlockingIOError:
                 has_lock = False
                 if fast_fail:
                     sys.exit(2)
+            except (IOError, OSError):
+                has_lock = False
 
             current_cache = {}
             if cache_file.exists():
@@ -556,44 +559,35 @@ def aggregate_usage(
             f"Warning: Permission denied for lock file {lock_file_path}: {e}. Cache writing disabled.",
             file=sys.stderr,
         )
+        can_write_cache = False
         if fast_fail:
             sys.exit(2)
-        if stats is None:
-            current_cache = {}
-            if cache_file.exists() and not force_refresh:
-                try:
-                    with cache_file.open("r", encoding="utf-8") as f:
-                        current_cache = json.load(f)
-                except (json.JSONDecodeError, IOError):
-                    pass
-            stats, _, _ = perform_aggregation(current_cache)
     except (ImportError, IOError, OSError):
         if fast_fail and stats is None:
             sys.exit(2)
-        if stats is None:
-            current_cache = {}
-            if cache_file.exists() and not force_refresh:
-                try:
-                    with cache_file.open("r", encoding="utf-8") as f:
-                        current_cache = json.load(f)
-                except (json.JSONDecodeError, IOError):
-                    pass
-            stats, newly_parsed_entries, cache_dirty = perform_aggregation(
-                current_cache
-            )
-            if cache_dirty:
-                try:
-                    import tempfile
 
-                    current_cache.update(newly_parsed_entries)
-                    fd, temp_path = tempfile.mkstemp(
-                        dir=str(cache_file.parent), prefix="usage_cache_"
-                    )
-                    with os.fdopen(fd, "w", encoding="utf-8") as f:
-                        json.dump(current_cache, f)
-                    os.replace(temp_path, str(cache_file))
-                except (IOError, OSError, TypeError, NameError):
-                    pass
+    if stats is None:
+        current_cache = {}
+        if cache_file.exists() and not force_refresh:
+            try:
+                with cache_file.open("r", encoding="utf-8") as f:
+                    current_cache = json.load(f)
+            except (json.JSONDecodeError, IOError):
+                pass
+        stats, newly_parsed_entries, cache_dirty = perform_aggregation(current_cache)
+        if cache_dirty and can_write_cache:
+            try:
+                import tempfile
+
+                current_cache.update(newly_parsed_entries)
+                fd, temp_path = tempfile.mkstemp(
+                    dir=str(cache_file.parent), prefix="usage_cache_"
+                )
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(current_cache, f)
+                os.replace(temp_path, str(cache_file))
+            except (IOError, OSError, TypeError, NameError):
+                pass
 
     return stats
 

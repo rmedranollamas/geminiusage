@@ -75,8 +75,6 @@ if [[ "$NEEDS_UPDATE" == "true" ]]; then
                     if [[ -n "$TEMP_FILE" ]]; then
                         echo "$FINAL_STR" > "$TEMP_FILE"
                         mv "$TEMP_FILE" "$CACHE_FILE"
-                    else
-                        echo "$FINAL_STR" > "$CACHE_FILE"
                     fi
                 else
                     # If it fails, we keep the old cache if it exists, or write 0.0M
