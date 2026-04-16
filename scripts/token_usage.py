@@ -505,12 +505,13 @@ def aggregate_usage(
         return agg_stats, newly_parsed, dirty
 
     can_write_cache = True
-    stats = None
+    stats: Any = None
     try:
         import fcntl
 
         with lock_file_path.open("a+") as lock_f:
             try:
+                # Always use non-blocking lock to adhere to mandate in GEMINI.md
                 fcntl.flock(lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 has_lock = True
             except BlockingIOError:
@@ -519,6 +520,7 @@ def aggregate_usage(
                     sys.exit(2)
             except (IOError, OSError):
                 has_lock = False
+                can_write_cache = False
 
             current_cache = {}
             if cache_file.exists():
@@ -563,6 +565,7 @@ def aggregate_usage(
         if fast_fail:
             sys.exit(2)
     except (ImportError, IOError, OSError):
+        can_write_cache = False
         if fast_fail and stats is None:
             sys.exit(2)
 
