@@ -511,7 +511,10 @@ def aggregate_usage(
 
         with lock_file_path.open("a+") as lock_f:
             try:
-                fcntl.flock(lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if fast_fail:
+                    fcntl.flock(lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                else:
+                    fcntl.flock(lock_f, fcntl.LOCK_EX)
                 has_lock = True
             except BlockingIOError:
                 has_lock = False
@@ -519,6 +522,7 @@ def aggregate_usage(
                     sys.exit(2)
             except (IOError, OSError):
                 has_lock = False
+                can_write_cache = False
 
             current_cache = {}
             if cache_file.exists():
@@ -563,6 +567,7 @@ def aggregate_usage(
         if fast_fail:
             sys.exit(2)
     except (ImportError, IOError, OSError):
+        can_write_cache = False
         if fast_fail and stats is None:
             sys.exit(2)
 

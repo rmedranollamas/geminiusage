@@ -56,7 +56,7 @@ if [[ "$NEEDS_UPDATE" == "true" ]]; then
                 # Run the python script and format to millions (e.g., 1.2M)
                 # Redirect stderr to /dev/null to keep tmux status clean
                 # We use a temporary file for atomic updates
-                TEMP_FILE=$(mktemp "${CACHE_FILE}.XXXXXX" 2>/dev/null) || TEMP_FILE=""
+                TEMP_FILE=$(mktemp "${CACHE_FILE}.XXXXXX" 2>/dev/null) || TEMP_FILE="${CACHE_FILE}.$$.tmp"
                 TOTAL_OUTPUT=$(python3 "$PYTHON_SCRIPT" --today --raw --agy --fast-fail 2>/dev/null)
 
                 if [[ -n "$TOTAL_OUTPUT" ]]; then
@@ -73,8 +73,11 @@ if [[ "$NEEDS_UPDATE" == "true" ]]; then
                     fi
                     
                     if [[ -n "$TEMP_FILE" ]]; then
-                        echo "$FINAL_STR" > "$TEMP_FILE"
-                        mv "$TEMP_FILE" "$CACHE_FILE"
+                        if echo "$FINAL_STR" > "$TEMP_FILE" 2>/dev/null; then
+                            mv "$TEMP_FILE" "$CACHE_FILE"
+                        else
+                            rm -f "$TEMP_FILE"
+                        fi
                     fi
                 else
                     # If it fails, we keep the old cache if it exists, or write 0.0M
