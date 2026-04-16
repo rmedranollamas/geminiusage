@@ -54,6 +54,7 @@ class UsageTUI:
         self.filter_options = [
             "all",
             "today",
+            "24h",
             "yesterday",
             "this-week",
             "last-week",
