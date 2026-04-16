@@ -504,7 +504,7 @@ def aggregate_usage(
                     try:
                         bucket_ts = datetime.strptime(
                             bucket_str, "%Y-%m-%dT%H"
-                        ).timestamp()
+                        ).replace(tzinfo=timezone.utc).timestamp()
                         # If the bucket is entirely before our cutoff, skip it.
                         # Note: a bucket for hour 14 covers [14:00, 15:00).
                         # If since_timestamp is 14:30, we should ideally include
