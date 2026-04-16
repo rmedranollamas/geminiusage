@@ -302,6 +302,7 @@ def discover_session_files(
 def aggregate_usage(
     base_dir: Optional[Path] = None,
     since_mtime: Optional[float] = None,
+    since_timestamp: Optional[float] = None,
     date_filter: Optional[Set[str]] = None,
     force_refresh: bool = False,
     fast_fail: bool = False,
@@ -331,7 +332,10 @@ def aggregate_usage(
         )
         newly_parsed: Dict[str, Any] = {}
         dirty = force_refresh
-        discover_since = (since_mtime - 3600) if since_mtime else None
+
+        times = [t for t in [since_mtime, since_timestamp] if t is not None]
+        discover_since = (min(times) - 3600) if times else None
+
         session_files = discover_session_files(scan_dirs, since_mtime=discover_since)
         session_file_keys = {str(f) for f in session_files}
 
@@ -403,7 +407,7 @@ def aggregate_usage(
                 turn_start_ts = None
                 turn_end_ts = None
                 last_model_in_turn = "unknown"
-                last_turn_date_str = session_date_str
+                last_turn_bucket = session_date_str
 
                 for msg in messages:
                     if not isinstance(msg, dict):
@@ -412,32 +416,32 @@ def aggregate_usage(
                     msg_type = msg.get("type")
                     raw_ts = msg.get("timestamp")
                     ts_val = None
-                    msg_date_str = session_date_str
+                    msg_bucket = session_date_str
 
                     if raw_ts:
                         try:
-                            ts_val = datetime.fromisoformat(
-                                raw_ts.replace("Z", "+00:00")
-                            ).timestamp()
-                            msg_date_str = (
-                                raw_ts.split("T")[0]
-                                if "T" in raw_ts
-                                else session_date_str
-                            )
+                            dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+                            ts_val = dt.timestamp()
+                            # Use hourly buckets for higher precision caching if timestamp is available
+                            msg_bucket = dt.strftime("%Y-%m-%dT%H")
                         except (ValueError, AttributeError):
                             pass
 
+                    # Filter by precise timestamp if requested
+                    if since_timestamp and ts_val and ts_val < since_timestamp:
+                        continue
+
                     if msg_type == "user" and ts_val:
                         if turn_start_ts and turn_end_ts:
-                            file_record_stats[last_turn_date_str][last_model_in_turn][
+                            file_record_stats[last_turn_bucket][last_model_in_turn][
                                 "duration"
-                            ] = file_record_stats[last_turn_date_str][
+                            ] = file_record_stats[last_turn_bucket][
                                 last_model_in_turn
                             ].get("duration", 0.0) + max(0, turn_end_ts - turn_start_ts)
 
                         turn_start_ts = ts_val
                         turn_end_ts = None
-                        last_turn_date_str = msg_date_str
+                        last_turn_bucket = msg_bucket
                         continue
 
                     if msg_type != "gemini":
@@ -460,7 +464,7 @@ def aggregate_usage(
                     cost = calculate_cost(model_name, inp, cache_tokens, out)
                     uncached_inp = max(0, inp - cache_tokens)
 
-                    r_stats = file_record_stats[msg_date_str][model_name]
+                    r_stats = file_record_stats[msg_bucket][model_name]
                     r_stats["session_id"] = session_id
                     r_stats["input"] = r_stats.get("input", 0) + uncached_inp
                     r_stats["cached"] = r_stats.get("cached", 0) + cache_tokens
@@ -468,9 +472,9 @@ def aggregate_usage(
                     r_stats["cost"] = r_stats.get("cost", 0) + cost
 
                 if turn_start_ts and turn_end_ts:
-                    file_record_stats[last_turn_date_str][last_model_in_turn][
+                    file_record_stats[last_turn_bucket][last_model_in_turn][
                         "duration"
-                    ] = file_record_stats[last_turn_date_str][last_model_in_turn].get(
+                    ] = file_record_stats[last_turn_bucket][last_model_in_turn].get(
                         "duration", 0.0
                     ) + max(0, turn_end_ts - turn_start_ts)
 
@@ -489,10 +493,33 @@ def aggregate_usage(
                 continue
 
             file_stats = cached_data.get("stats", {})
-            for date_str, models in file_stats.items():
+            for bucket_str, models in file_stats.items():
+                # Apply date filter (bucket_str could be YYYY-MM-DD or YYYY-MM-DDTHH)
+                date_str = bucket_str[:10]
                 if date_filter and date_str not in date_filter:
                     continue
+
+                # Apply precise timestamp filter if available in bucket string
+                if since_timestamp and "T" in bucket_str:
+                    try:
+                        bucket_ts = datetime.strptime(
+                            bucket_str, "%Y-%m-%dT%H"
+                        ).replace(tzinfo=timezone.utc).timestamp()
+                        # If the bucket is entirely before our cutoff, skip it.
+                        # Note: a bucket for hour 14 covers [14:00, 15:00).
+                        # If since_timestamp is 14:30, we should ideally include
+                        # messages from that bucket, but we can't tell which ones
+                        # from the aggregated bucket. However, since we re-parse
+                        # files that are new/changed, this mostly affects older
+                        # cached entries. For 24h rolling, it's "close enough"
+                        # to filter at hourly granularity for cached data.
+                        if bucket_ts + 3600 < since_timestamp:
+                            continue
+                    except ValueError:
+                        pass
+
                 for model_name, s in models.items():
+                    # Normalize back to daily for the final report
                     m_stats = agg_stats[date_str][model_name]
                     if "session_id" in s:
                         m_stats.sessions.add(s["session_id"])
@@ -605,6 +632,10 @@ def get_date_range(
 
     if filter_name == "all":
         return None, None
+
+    if filter_name == "24h":
+        start = today_obj - timedelta(days=1)
+        return start.strftime("%Y-%m-%d"), today_obj.strftime("%Y-%m-%d")
 
     if filter_name == "today":
         d_str = today_obj.strftime("%Y-%m-%d")
@@ -924,6 +955,9 @@ def main() -> None:
         "--today", action="store_true", help="Only show usage for today."
     )
     date_group.add_argument(
+        "--rolling-24h", "--24h", action="store_true", dest="rolling_24h", help="Show usage for the last 24 hours."
+    )
+    date_group.add_argument(
         "--yesterday", action="store_true", help="Only show usage for yesterday."
     )
     date_group.add_argument(
@@ -950,6 +984,8 @@ def main() -> None:
     filter_name = "all"
     if args.today:
         filter_name = "today"
+    elif args.rolling_24h:
+        filter_name = "24h"
     elif args.yesterday:
         filter_name = "yesterday"
     elif args.this_week:
@@ -968,7 +1004,13 @@ def main() -> None:
     start_date, end_date = get_date_range(filter_name)
 
     since_mtime = None
+    since_timestamp = None
     date_filter = None
+
+    if filter_name == "24h":
+        import time
+
+        since_timestamp = time.time() - 86400
 
     if start_date and end_date:
         try:
@@ -990,16 +1032,17 @@ def main() -> None:
     stats = aggregate_usage(
         args.dir,
         since_mtime=since_mtime,
+        since_timestamp=since_timestamp,
         date_filter=date_filter,
         force_refresh=args.refresh,
         fast_fail=args.fast_fail,
     )
 
-    if args.today:
+    if args.today or args.rolling_24h:
         print_report(
             stats,
             show_models=args.model,
-            today_only=True,
+            today_only=args.today,
             raw_tokens_only=args.raw,
             show_hours=args.hours,
             show_antigravity=args.antigravity,

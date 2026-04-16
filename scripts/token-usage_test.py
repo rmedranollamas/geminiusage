@@ -495,6 +495,57 @@ class TestTokenUsage(unittest.TestCase):
             stats2 = token_usage.aggregate_usage(base_dir=tmp_path)
             self.assertEqual(stats2["2026-01-20"]["m1"].input_tokens, 30)
 
+    def test_rolling_24h_filter(self) -> None:
+        """Verifies that rolling 24-hour filter correctly excludes old messages."""
+        with TemporaryDirectory() as tmpdirname:
+            tmp_path = Path(tmpdirname)
+            chat_dir = tmp_path / "chats"
+            chat_dir.mkdir(parents=True)
+
+            # Current time: 2026-01-20T12:00:00Z
+            now_ts = datetime(2026, 1, 20, 12, 0, 0, tzinfo=timezone.utc).timestamp()
+            cutoff_ts = now_ts - 86400  # 24h ago
+
+            session_data = {
+                "sessionId": "test-24h",
+                "startTime": "2026-01-19T10:00:00Z",
+                "messages": [
+                    {
+                        "type": "gemini",
+                        "model": "m1",
+                        "timestamp": "2026-01-19T11:00:00Z", # >24h ago
+                        "tokens": {"input": 100},
+                    },
+                    {
+                        "type": "gemini",
+                        "model": "m1",
+                        "timestamp": "2026-01-19T13:00:00Z", # <24h ago
+                        "tokens": {"input": 50},
+                    },
+                    {
+                        "type": "gemini",
+                        "model": "m1",
+                        "timestamp": "2026-01-20T10:00:00Z", # <24h ago
+                        "tokens": {"input": 30},
+                    },
+                ],
+            }
+            session_file = chat_dir / "session-24h.json"
+            with session_file.open("w") as f:
+                json.dump(session_data, f)
+
+            # Test with since_timestamp
+            stats = token_usage.aggregate_usage(base_dir=tmp_path, since_timestamp=cutoff_ts)
+
+            # Should have 50 + 30 = 80 tokens.
+            # 100 should be excluded.
+            total_input = 0
+            for day_stats in stats.values():
+                for m_stats in day_stats.values():
+                    total_input += m_stats.input_tokens
+
+            self.assertEqual(total_input, 80)
+
     def test_fast_fail_lock(self) -> None:
         """Verifies that fast_fail flag causes immediate exit if lock cannot be acquired."""
         with TemporaryDirectory() as tmpdirname:
