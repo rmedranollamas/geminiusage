@@ -36,6 +36,8 @@ def _find_process() -> Optional[Dict[str, Any]]:
                 if "language_server" in cmdline and (
                     "--app_data_dir antigravity" in cmdline
                     or "/antigravity/" in cmdline
+                    or "--app_data_dir jetski" in cmdline
+                    or "/jetski/" in cmdline
                 ):
                     csrf_match = re.search(r"--csrf_token\s+([^\s]+)", cmdline)
                     csrf_token = csrf_match.group(1) if csrf_match else None
@@ -55,7 +57,10 @@ def _find_process() -> Optional[Dict[str, Any]]:
 
         for line in output.splitlines():
             if "language_server" in line and (
-                "--app_data_dir antigravity" in line or "/antigravity/" in line
+                "--app_data_dir antigravity" in line
+                or "/antigravity/" in line
+                or "--app_data_dir jetski" in line
+                or "/jetski/" in line
             ):
                 pid_match = re.search(r"^\s*(\d+)", line)
                 if not pid_match:
