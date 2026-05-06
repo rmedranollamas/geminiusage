@@ -438,8 +438,10 @@ class TestTokenUsage(unittest.TestCase):
                 f.write(json.dumps({"sessionId": "mixed-id", "startTime": "2026-03-01T12:00:00Z"}) + "\n")
                 # Valid message
                 f.write(json.dumps({"type": "gemini", "model": "m1", "tokens": {"input": 100}}) + "\n")
-                # Malformed line
+                # Malformed line (invalid JSON)
                 f.write("{ invalid json\n")
+                # Valid JSON but not a dictionary (should also be skipped)
+                f.write("123\n")
                 # Another valid message
                 f.write(json.dumps({"type": "gemini", "model": "m1", "tokens": {"input": 50}}) + "\n")
 
