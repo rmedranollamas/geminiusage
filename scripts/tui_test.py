@@ -98,6 +98,45 @@ class TestUsageTUI(unittest.TestCase):
         # col_widths[1] should be at least length of long model name
         self.assertGreater(self.tui.view_state.col_widths[1], 40)
 
+    @patch("subprocess.call")
+    @patch("curses.def_shell_mode")
+    @patch("curses.reset_shell_mode")
+    @patch("token_usage.reload_config")
+    @patch("tui.UsageTUI.load_data")
+    def test_edit_pricing_security(
+        self, mock_load, mock_reload, mock_reset, mock_def, mock_call
+    ) -> None:
+        """Verifies that the editor execution is secure."""
+        mock_stdscr = MagicMock()
+
+        # Case 1: Safe editor
+        with patch.dict(os.environ, {"EDITOR": "nano"}):
+            self.tui.edit_pricing(mock_stdscr)
+            # Find the call that includes nano
+            nano_call = next(c for c in mock_call.call_args_list if "nano" in c[0][0])
+            self.assertEqual(nano_call[0][0][0], "nano")
+
+        # Case 2: Safe editor with arguments
+        mock_call.reset_mock()
+        with patch.dict(os.environ, {"EDITOR": "vim -u NONE"}):
+            self.tui.edit_pricing(mock_stdscr)
+            vim_call = next(c for c in mock_call.call_args_list if "vim" in c[0][0])
+            self.assertEqual(vim_call[0][0][:2], ["vim", "-u"])
+
+        # Case 3: Unsafe editor (should fallback to vi)
+        mock_call.reset_mock()
+        with patch.dict(os.environ, {"EDITOR": "rm -rf /"}):
+            self.tui.edit_pricing(mock_stdscr)
+            vi_call = next(c for c in mock_call.call_args_list if "vi" in c[0][0])
+            self.assertEqual(vi_call[0][0][0], "vi")
+
+        # Case 4: Path injection attempt (should fallback to vi)
+        mock_call.reset_mock()
+        with patch.dict(os.environ, {"EDITOR": "/tmp/malicious_script.sh"}):
+            self.tui.edit_pricing(mock_stdscr)
+            vi_call = next(c for c in mock_call.call_args_list if "vi" in c[0][0])
+            self.assertEqual(vi_call[0][0][0], "vi")
+
 
 if __name__ == "__main__":
     unittest.main()
