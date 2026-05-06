@@ -5,6 +5,7 @@ import argparse
 import curses
 import json
 import os
+import shlex
 import subprocess
 import threading
 import time
@@ -481,8 +482,37 @@ class UsageTUI:
         curses.def_shell_mode()
         stdscr.clear()
         stdscr.refresh()
-        editor = os.environ.get("EDITOR", "vi")
-        subprocess.call([editor, str(pricing_path)])
+
+        # Security: Validate and parse the EDITOR environment variable
+        raw_editor = os.environ.get("EDITOR", "vi")
+        try:
+            editor_parts = shlex.split(raw_editor)
+        except ValueError:
+            editor_parts = ["vi"]
+
+        if not editor_parts:
+            editor_parts = ["vi"]
+
+        # Allowlist of safe editors
+        safe_editors = {
+            "vi",
+            "vim",
+            "nano",
+            "emacs",
+            "joe",
+            "ed",
+            "nvim",
+            "code",
+            "subl",
+            "notepad",
+        }
+
+        # Check if the base command is in the allowlist
+        executable = os.path.basename(editor_parts[0])
+        if executable not in safe_editors:
+            editor_parts = ["vi"]
+
+        subprocess.call(editor_parts + [str(pricing_path)])
         curses.reset_shell_mode()
 
         token_usage.reload_config()
