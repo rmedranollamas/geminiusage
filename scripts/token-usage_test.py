@@ -359,6 +359,23 @@ class TestTokenUsage(unittest.TestCase):
                     self.assertEqual(tiered.large_context.input_rate, 4.0)
                 self.assertEqual(tiered.context_threshold, 100_000)
 
+    def test_load_config_malformed(self) -> None:
+        """Verifies that load_config handles malformed JSON in pricing.json gracefully."""
+        with TemporaryDirectory() as tmpdirname:
+            tmp_path = Path(tmpdirname)
+            pricing_file = tmp_path / ".gemini" / "pricing.json"
+            pricing_file.parent.mkdir()
+
+            with pricing_file.open("w") as f:
+                f.write("{ invalid json: [")
+
+            with patch("pathlib.Path.home", return_value=tmp_path):
+                config = token_usage.load_config()
+                # Should fallback to defaults
+                self.assertEqual(
+                    config.get_pricing("unknown"), config.default_pricing
+                )
+
     def test_aggregate_usage_custom_dir(self) -> None:
         """Verifies that aggregate_usage handles a custom base_dir correctly."""
         with TemporaryDirectory() as tmpdirname:
@@ -381,6 +398,57 @@ class TestTokenUsage(unittest.TestCase):
 
             # Check local cache
             self.assertTrue((tmp_path / "usage_cache.json").exists())
+
+    def test_aggregate_usage_malformed_json(self) -> None:
+        """Verifies that aggregate_usage skips malformed .json files."""
+        with TemporaryDirectory() as tmpdirname:
+            tmp_path = Path(tmpdirname)
+            chat_dir = tmp_path / "chats"
+            chat_dir.mkdir(parents=True)
+
+            # Valid file
+            f1 = chat_dir / "session-valid.json"
+            with f1.open("w") as f:
+                json.dump({
+                    "sessionId": "valid-id",
+                    "startTime": "2026-03-01T12:00:00Z",
+                    "messages": [{"type": "gemini", "model": "m1", "tokens": {"input": 100}}]
+                }, f)
+
+            # Malformed file
+            f2 = chat_dir / "session-malformed.json"
+            with f2.open("w") as f:
+                f.write("{ invalid json")
+
+            stats = token_usage.aggregate_usage(base_dir=tmp_path)
+            # Should still have stats from the valid file
+            self.assertIn("2026-03-01", stats)
+            self.assertEqual(stats["2026-03-01"]["m1"].input_tokens, 100)
+
+    def test_aggregate_usage_malformed_jsonl(self) -> None:
+        """Verifies that aggregate_usage skips malformed lines in .jsonl files."""
+        with TemporaryDirectory() as tmpdirname:
+            tmp_path = Path(tmpdirname)
+            chat_dir = tmp_path / "chats"
+            chat_dir.mkdir(parents=True)
+
+            session_file = chat_dir / "session-mixed.jsonl"
+            with session_file.open("w") as f:
+                # Valid session info
+                f.write(json.dumps({"sessionId": "mixed-id", "startTime": "2026-03-01T12:00:00Z"}) + "\n")
+                # Valid message
+                f.write(json.dumps({"type": "gemini", "model": "m1", "tokens": {"input": 100}}) + "\n")
+                # Malformed line (invalid JSON)
+                f.write("{ invalid json\n")
+                # Valid JSON but not a dictionary (should also be skipped)
+                f.write("123\n")
+                # Another valid message
+                f.write(json.dumps({"type": "gemini", "model": "m1", "tokens": {"input": 50}}) + "\n")
+
+            stats = token_usage.aggregate_usage(base_dir=tmp_path)
+            self.assertIn("2026-03-01", stats)
+            # Should have 100 + 50 = 150 tokens
+            self.assertEqual(stats["2026-03-01"]["m1"].input_tokens, 150)
 
     def test_aggregation_keeps_deleted_files(self) -> None:
         """Verifies that stats are kept for files deleted from disk but present in cache."""
