@@ -666,10 +666,11 @@ class UsageTUI:
 
             if self.ui_dirty:
                 # We don't erase the whole screen to prevent flickering of header/footer
-                # Instead, we just clear the work area
-                for y in range(1, h - 1):
-                    stdscr.move(y, 0)
-                    stdscr.clrtoeol()
+                # Instead, we just clear the work area efficiently
+                stdscr.move(1, 0)
+                stdscr.clrtobot()
+                self.draw_footer(stdscr)
+                stdscr.noutrefresh()
 
                 if self.show_antigravity:
                     self.draw_antigravity_view(stdscr, 2, h - 2)
