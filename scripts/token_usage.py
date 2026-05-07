@@ -368,6 +368,9 @@ def aggregate_usage(
                             except json.JSONDecodeError:
                                 continue
 
+                            if not isinstance(obj, dict):
+                                continue
+
                             if "$set" in obj:
                                 continue
 
