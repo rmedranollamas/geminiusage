@@ -640,6 +640,7 @@ class UsageTUI:
                 stdscr.move(1, 0)
                 stdscr.clrtobot()
                 self.draw_footer(stdscr)
+                stdscr.noutrefresh()
 
                 if self.show_antigravity:
                     self.draw_antigravity_view(stdscr, 2, h - 2)
