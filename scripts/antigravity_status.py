@@ -19,7 +19,7 @@ def _is_loopback(url: str) -> bool:
         if not hostname:
             return False
         return hostname in ("127.0.0.1", "localhost", "::1")
-    except Exception:
+    except ValueError:
         return False
 
 
