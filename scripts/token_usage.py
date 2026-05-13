@@ -14,16 +14,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 # Add scripts directory to path to allow importing local modules
 sys.path.append(os.path.dirname(__file__))
 
-# Optional Antigravity status module
-antigravity_status: Any = None
-try:
-    import antigravity_status as ag_status
-
-    antigravity_status = ag_status
-except ImportError:
-    pass
-
-
 @dataclass
 class ModelStats:
     """Statistics for a specific model usage."""
@@ -694,26 +684,25 @@ def filter_stats(
 
 def get_antigravity_summary() -> str:
     """Returns a compact Antigravity status summary."""
-    if not antigravity_status:
-        return ""
-
     try:
-        status = antigravity_status.get_status()
+        from antigravity_status import get_status
+
+        status = get_status()
         if not status or not status.get("running"):
-            return ""
+            return "Not running"
 
         if not status.get("connected"):
-            return " | AGY: DISC"
+            return "DISC"
 
         models = status.get("models", [])
         if not models:
-            return " | AGY: OK"
+            return "OK"
 
         low_model = models[0]
         rem_pct = int(low_model["remaining"] * 100)
-        return f" | AGY: {low_model['label']} {rem_pct}%"
-    except Exception:
-        return ""
+        return f"{low_model['label']} {rem_pct}%"
+    except (ImportError, Exception):
+        return "Not running"
 
 
 def print_report(
@@ -739,7 +728,9 @@ def print_report(
     if raw_tokens_only:
         output = str(grand_total.total_tokens)
         if show_antigravity:
-            output += get_antigravity_summary()
+            agy_summary = get_antigravity_summary()
+            if agy_summary and agy_summary != "Not running":
+                output += f" | AGY: {agy_summary}"
         print(output)
         return
 
@@ -828,7 +819,7 @@ def print_report(
     if show_antigravity:
         agy_summary = get_antigravity_summary()
         if agy_summary:
-            print(f"\nAntigravity Status:{agy_summary.replace(' | AGY:', '')}")
+            print(f"\nAntigravity Status: {agy_summary}")
 
 
 def print_summary_statistics(
