@@ -227,7 +227,7 @@ def render_sparkline(values: List[int], width: int = 30) -> str:
 def discover_session_files(
     scan_dirs: List[Path],
     since_mtime: Optional[float] = None,
-) -> List[Path]:
+) -> List[Tuple[Path, os.stat_result]]:
     """Discovers Gemini session JSON files in the given directories."""
     session_files = []
 
@@ -253,12 +253,12 @@ def discover_session_files(
                                                 or f_entry.name.endswith(".jsonl")
                                             )
                                         ):
+                                            f_stat = f_entry.stat()
                                             if (
                                                 not since_mtime
-                                                or f_entry.stat().st_mtime
-                                                >= since_mtime
+                                                or f_stat.st_mtime >= since_mtime
                                             ):
-                                                dir_files.append(Path(f_entry.path))
+                                                dir_files.append((Path(f_entry.path), f_stat))
                             else:
                                 with os.scandir(entry.path) as it_uuid:
                                     for f_entry in it_uuid:
@@ -270,12 +270,12 @@ def discover_session_files(
                                                 or f_entry.name.endswith(".jsonl")
                                             )
                                         ):
+                                            f_stat = f_entry.stat()
                                             if (
                                                 not since_mtime
-                                                or f_entry.stat().st_mtime
-                                                >= since_mtime
+                                                or f_stat.st_mtime >= since_mtime
                                             ):
-                                                dir_files.append(Path(f_entry.path))
+                                                dir_files.append((Path(f_entry.path), f_stat))
                         except (IOError, OSError):
                             continue
         except (IOError, OSError):
@@ -289,8 +289,9 @@ def discover_session_files(
                     ):
                         try:
                             f_path = Path(root) / filename
-                            if not since_mtime or f_path.stat().st_mtime >= since_mtime:
-                                dir_files.append(f_path)
+                            f_stat = f_path.stat()
+                            if not since_mtime or f_stat.st_mtime >= since_mtime:
+                                dir_files.append((f_path, f_stat))
                         except (IOError, OSError):
                             continue
 
@@ -337,11 +338,10 @@ def aggregate_usage(
         discover_since = (min(times) - 3600) if times else None
 
         session_files = discover_session_files(scan_dirs, since_mtime=discover_since)
-        session_file_keys = {str(f) for f in session_files}
+        session_file_keys = {str(f) for f, _ in session_files}
 
-        for session_file in session_files:
+        for session_file, stat in session_files:
             try:
-                stat = session_file.stat()
                 mtime = stat.st_mtime
                 size = stat.st_size
                 file_key = str(session_file)
@@ -568,7 +568,7 @@ def aggregate_usage(
                 current_cache.update(newly_parsed_entries)
                 if force_refresh:
                     session_files = discover_session_files(scan_dirs)
-                    disk_keys = {str(f) for f in session_files}
+                    disk_keys = {str(f) for f, _ in session_files}
                     current_cache = {
                         k: v for k, v in current_cache.items() if k in disk_keys
                     }
