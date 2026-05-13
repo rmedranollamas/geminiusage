@@ -8,28 +8,10 @@ import ssl
 import subprocess
 import urllib.request
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
 
-
-def _is_loopback(url: str) -> bool:
-    """Checks if a URL refers to a loopback address."""
-    try:
-        parsed = urlparse(url)
-        hostname = parsed.hostname
-        if not hostname:
-            return False
-        return hostname in ("127.0.0.1", "localhost", "::1")
-    except ValueError:
-        return False
-
-
-def _get_ssl_context(url: str) -> ssl.SSLContext:
-    """Returns an unverified context only for loopback addresses."""
-    if _is_loopback(url):
-        # Local HTTPS uses a self-signed cert; allow insecure TLS for local communication.
-        # This is necessary because the Antigravity language server generates its own certs.
-        return ssl._create_unverified_context()
-    return ssl.create_default_context()
+# Local HTTPS uses a self-signed cert; allow insecure TLS for local communication.
+# This is necessary because the Antigravity language server generates its own certs.
+SSL_CONTEXT = ssl._create_unverified_context()
 
 # Mapping Priority and Display Labels
 MODEL_MAPPING = [
@@ -165,7 +147,7 @@ def _probe_connect_port(
         )
         try:
             with urllib.request.urlopen(
-                req, context=_get_ssl_context(url), timeout=1
+                req, context=SSL_CONTEXT, timeout=1
             ) as response:
                 if response.status == 200:
                     return port
@@ -212,9 +194,7 @@ def get_status() -> Dict[str, Any]:
             },
             method="POST",
         )
-        with urllib.request.urlopen(
-            req, context=_get_ssl_context(url), timeout=2
-        ) as response:
+        with urllib.request.urlopen(req, context=SSL_CONTEXT, timeout=2) as response:
             if response.status == 200:
                 status_data = json.loads(response.read().decode("utf-8"))
     except Exception:
@@ -232,7 +212,7 @@ def get_status() -> Dict[str, Any]:
                 method="POST",
             )
             with urllib.request.urlopen(
-                req, context=_get_ssl_context(url), timeout=2
+                req, context=SSL_CONTEXT, timeout=2
             ) as response:
                 if response.status == 200:
                     status_data = json.loads(response.read().decode("utf-8"))
