@@ -282,9 +282,10 @@ def discover_session_files(
         if not dir_files:
             for root, _, files in os.walk(str(tmp_dir)):
                 for filename in files:
-                    f_path = Path(root) / filename
-                    if _is_valid_session_file(f_path, since_mtime):
-                        dir_files.append(f_path)
+                    if filename.startswith("session-") and filename.endswith((".json", ".jsonl")):
+                        f_path = Path(root) / filename
+                        if _is_valid_session_file(f_path, since_mtime):
+                            dir_files.append(f_path)
 
         session_files.extend(dir_files)
 
