@@ -224,6 +224,28 @@ def render_sparkline(values: List[int], width: int = 30) -> str:
     return spark
 
 
+def _is_valid_session_file(entry: Any, since_mtime: Optional[float] = None) -> bool:
+    """Checks if a file entry is a valid Gemini session file."""
+    try:
+        # Check name patterns first (cheapest)
+        name = entry.name
+        if not name.startswith("session-"):
+            return False
+        if not (name.endswith(".json") or name.endswith(".jsonl")):
+            return False
+
+        # Check if it's a file and matches mtime (may hit disk)
+        if not entry.is_file():
+            return False
+
+        if since_mtime and entry.stat().st_mtime < since_mtime:
+            return False
+
+        return True
+    except (IOError, OSError):
+        return False
+
+
 def discover_session_files(
     scan_dirs: List[Path],
     since_mtime: Optional[float] = None,
@@ -245,37 +267,13 @@ def discover_session_files(
                             if os.path.exists(chats_path):
                                 with os.scandir(chats_path) as it_chats:
                                     for f_entry in it_chats:
-                                        if (
-                                            f_entry.is_file()
-                                            and f_entry.name.startswith("session-")
-                                            and (
-                                                f_entry.name.endswith(".json")
-                                                or f_entry.name.endswith(".jsonl")
-                                            )
-                                        ):
-                                            if (
-                                                not since_mtime
-                                                or f_entry.stat().st_mtime
-                                                >= since_mtime
-                                            ):
-                                                dir_files.append(Path(f_entry.path))
+                                        if _is_valid_session_file(f_entry, since_mtime):
+                                            dir_files.append(Path(f_entry.path))
                             else:
                                 with os.scandir(entry.path) as it_uuid:
                                     for f_entry in it_uuid:
-                                        if (
-                                            f_entry.is_file()
-                                            and f_entry.name.startswith("session-")
-                                            and (
-                                                f_entry.name.endswith(".json")
-                                                or f_entry.name.endswith(".jsonl")
-                                            )
-                                        ):
-                                            if (
-                                                not since_mtime
-                                                or f_entry.stat().st_mtime
-                                                >= since_mtime
-                                            ):
-                                                dir_files.append(Path(f_entry.path))
+                                        if _is_valid_session_file(f_entry, since_mtime):
+                                            dir_files.append(Path(f_entry.path))
                         except (IOError, OSError):
                             continue
         except (IOError, OSError):
@@ -284,15 +282,10 @@ def discover_session_files(
         if not dir_files:
             for root, _, files in os.walk(str(tmp_dir)):
                 for filename in files:
-                    if filename.startswith("session-") and (
-                        filename.endswith(".json") or filename.endswith(".jsonl")
-                    ):
-                        try:
-                            f_path = Path(root) / filename
-                            if not since_mtime or f_path.stat().st_mtime >= since_mtime:
-                                dir_files.append(f_path)
-                        except (IOError, OSError):
-                            continue
+                    if filename.startswith("session-") and filename.endswith((".json", ".jsonl")):
+                        f_path = Path(root) / filename
+                        if _is_valid_session_file(f_path, since_mtime):
+                            dir_files.append(f_path)
 
         session_files.extend(dir_files)
 
