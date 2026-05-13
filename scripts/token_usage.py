@@ -14,6 +14,16 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 # Add scripts directory to path to allow importing local modules
 sys.path.append(os.path.dirname(__file__))
 
+# Optional Antigravity status module
+antigravity_status: Any = None
+try:
+    import antigravity_status as ag_status
+
+    antigravity_status = ag_status
+except ImportError:
+    pass
+
+
 @dataclass
 class ModelStats:
     """Statistics for a specific model usage."""
@@ -214,32 +224,10 @@ def render_sparkline(values: List[int], width: int = 30) -> str:
     return spark
 
 
-def _is_valid_session_file(entry: Any, since_mtime: Optional[float] = None) -> bool:
-    """Checks if a file entry is a valid Gemini session file."""
-    try:
-        # Check name patterns first (cheapest)
-        name = entry.name
-        if not name.startswith("session-"):
-            return False
-        if not (name.endswith(".json") or name.endswith(".jsonl")):
-            return False
-
-        # Check if it's a file and matches mtime (may hit disk)
-        if not entry.is_file():
-            return False
-
-        if since_mtime and entry.stat().st_mtime < since_mtime:
-            return False
-
-        return True
-    except (IOError, OSError):
-        return False
-
-
 def discover_session_files(
     scan_dirs: List[Path],
     since_mtime: Optional[float] = None,
-) -> List[Path]:
+) -> List[Tuple[Path, os.stat_result]]:
     """Discovers Gemini session JSON files in the given directories."""
     session_files = []
 
@@ -257,13 +245,37 @@ def discover_session_files(
                             if os.path.exists(chats_path):
                                 with os.scandir(chats_path) as it_chats:
                                     for f_entry in it_chats:
-                                        if _is_valid_session_file(f_entry, since_mtime):
-                                            dir_files.append(Path(f_entry.path))
+                                        if (
+                                            f_entry.is_file()
+                                            and f_entry.name.startswith("session-")
+                                            and (
+                                                f_entry.name.endswith(".json")
+                                                or f_entry.name.endswith(".jsonl")
+                                            )
+                                        ):
+                                            f_stat = f_entry.stat()
+                                            if (
+                                                not since_mtime
+                                                or f_stat.st_mtime >= since_mtime
+                                            ):
+                                                dir_files.append((Path(f_entry.path), f_stat))
                             else:
                                 with os.scandir(entry.path) as it_uuid:
                                     for f_entry in it_uuid:
-                                        if _is_valid_session_file(f_entry, since_mtime):
-                                            dir_files.append(Path(f_entry.path))
+                                        if (
+                                            f_entry.is_file()
+                                            and f_entry.name.startswith("session-")
+                                            and (
+                                                f_entry.name.endswith(".json")
+                                                or f_entry.name.endswith(".jsonl")
+                                            )
+                                        ):
+                                            f_stat = f_entry.stat()
+                                            if (
+                                                not since_mtime
+                                                or f_stat.st_mtime >= since_mtime
+                                            ):
+                                                dir_files.append((Path(f_entry.path), f_stat))
                         except (IOError, OSError):
                             continue
         except (IOError, OSError):
@@ -272,10 +284,16 @@ def discover_session_files(
         if not dir_files:
             for root, _, files in os.walk(str(tmp_dir)):
                 for filename in files:
-                    if filename.startswith("session-") and filename.endswith((".json", ".jsonl")):
-                        f_path = Path(root) / filename
-                        if _is_valid_session_file(f_path, since_mtime):
-                            dir_files.append(f_path)
+                    if filename.startswith("session-") and (
+                        filename.endswith(".json") or filename.endswith(".jsonl")
+                    ):
+                        try:
+                            f_path = Path(root) / filename
+                            f_stat = f_path.stat()
+                            if not since_mtime or f_stat.st_mtime >= since_mtime:
+                                dir_files.append((f_path, f_stat))
+                        except (IOError, OSError):
+                            continue
 
         session_files.extend(dir_files)
 
@@ -320,11 +338,10 @@ def aggregate_usage(
         discover_since = (min(times) - 3600) if times else None
 
         session_files = discover_session_files(scan_dirs, since_mtime=discover_since)
-        session_file_keys = {str(f) for f in session_files}
+        session_file_keys = {str(f) for f, _ in session_files}
 
-        for session_file in session_files:
+        for session_file, stat in session_files:
             try:
-                stat = session_file.stat()
                 mtime = stat.st_mtime
                 size = stat.st_size
                 file_key = str(session_file)
@@ -551,7 +568,7 @@ def aggregate_usage(
                 current_cache.update(newly_parsed_entries)
                 if force_refresh:
                     session_files = discover_session_files(scan_dirs)
-                    disk_keys = {str(f) for f in session_files}
+                    disk_keys = {str(f) for f, _ in session_files}
                     current_cache = {
                         k: v for k, v in current_cache.items() if k in disk_keys
                     }
@@ -684,25 +701,26 @@ def filter_stats(
 
 def get_antigravity_summary() -> str:
     """Returns a compact Antigravity status summary."""
-    try:
-        from antigravity_status import get_status
+    if not antigravity_status:
+        return ""
 
-        status = get_status()
+    try:
+        status = antigravity_status.get_status()
         if not status or not status.get("running"):
-            return "Not running"
+            return ""
 
         if not status.get("connected"):
-            return "DISC"
+            return " | AGY: DISC"
 
         models = status.get("models", [])
         if not models:
-            return "OK"
+            return " | AGY: OK"
 
         low_model = models[0]
         rem_pct = int(low_model["remaining"] * 100)
-        return f"{low_model['label']} {rem_pct}%"
-    except (ImportError, Exception):
-        return "Not running"
+        return f" | AGY: {low_model['label']} {rem_pct}%"
+    except Exception:
+        return ""
 
 
 def print_report(
@@ -728,9 +746,7 @@ def print_report(
     if raw_tokens_only:
         output = str(grand_total.total_tokens)
         if show_antigravity:
-            agy_summary = get_antigravity_summary()
-            if agy_summary and agy_summary != "Not running":
-                output += f" | AGY: {agy_summary}"
+            output += get_antigravity_summary()
         print(output)
         return
 
@@ -819,7 +835,7 @@ def print_report(
     if show_antigravity:
         agy_summary = get_antigravity_summary()
         if agy_summary:
-            print(f"\nAntigravity Status: {agy_summary}")
+            print(f"\nAntigravity Status:{agy_summary.replace(' | AGY:', '')}")
 
 
 def print_summary_statistics(

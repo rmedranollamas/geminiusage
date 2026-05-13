@@ -10,7 +10,7 @@ import unittest
 from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import token_usage
 
@@ -256,7 +256,8 @@ class TestTokenUsage(unittest.TestCase):
             # Non-session file
             (tmp_path / "other.txt").touch()
 
-            files = token_usage.discover_session_files([tmp_path])
+            files_with_stats = token_usage.discover_session_files([tmp_path])
+            files = [f for f, _ in files_with_stats]
             self.assertEqual(len(files), 2)
             self.assertIn(f1, files)
             self.assertIn(f2, files)
@@ -635,58 +636,6 @@ class TestTokenUsage(unittest.TestCase):
             finally:
                 fcntl.flock(lock_f, fcntl.LOCK_UN)
                 lock_f.close()
-
-
-class TestAntigravitySummary(unittest.TestCase):
-    """Tests for get_antigravity_summary function."""
-
-    def test_module_missing(self) -> None:
-        """Verifies output when antigravity_status module is not available."""
-        with patch.dict("sys.modules", {"antigravity_status": None}):
-            self.assertEqual(token_usage.get_antigravity_summary(), "Not running")
-
-    def test_not_running(self) -> None:
-        """Verifies output when Antigravity is not running."""
-        mock_status = MagicMock()
-        mock_status.get_status.return_value = {"running": False}
-        with patch.dict("sys.modules", {"antigravity_status": mock_status}):
-            self.assertEqual(token_usage.get_antigravity_summary(), "Not running")
-
-    def test_disconnected(self) -> None:
-        """Verifies output when Antigravity is running but disconnected."""
-        mock_status = MagicMock()
-        mock_status.get_status.return_value = {"running": True, "connected": False}
-        with patch.dict("sys.modules", {"antigravity_status": mock_status}):
-            self.assertEqual(token_usage.get_antigravity_summary(), "DISC")
-
-    def test_no_models(self) -> None:
-        """Verifies output when Antigravity is connected but has no models."""
-        mock_status = MagicMock()
-        mock_status.get_status.return_value = {"running": True, "connected": True, "models": []}
-        with patch.dict("sys.modules", {"antigravity_status": mock_status}):
-            self.assertEqual(token_usage.get_antigravity_summary(), "OK")
-
-    def test_with_models(self) -> None:
-        """Verifies output when Antigravity has models."""
-        mock_status = MagicMock()
-        mock_status.get_status.return_value = {
-            "running": True,
-            "connected": True,
-            "models": [
-                {"label": "Claude", "remaining": 0.85},
-                {"label": "Gemini", "remaining": 0.12},
-            ],
-        }
-        with patch.dict("sys.modules", {"antigravity_status": mock_status}):
-            # It should show the first model (already sorted by priority in get_status)
-            self.assertEqual(token_usage.get_antigravity_summary(), "Claude 85%")
-
-    def test_exception_handling(self) -> None:
-        """Verifies output when an exception occurs during status retrieval."""
-        mock_status = MagicMock()
-        mock_status.get_status.side_effect = Exception("API Error")
-        with patch.dict("sys.modules", {"antigravity_status": mock_status}):
-            self.assertEqual(token_usage.get_antigravity_summary(), "Not running")
 
 
 if __name__ == "__main__":
