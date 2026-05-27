@@ -21,8 +21,20 @@ MODEL_MAPPING = [
 ]
 
 
-def _find_process() -> Optional[Dict[str, Any]]:
-    """Detects the Antigravity language server process and extracts CLI flags."""
+def _find_processes() -> List[Dict[str, Any]]:
+    """Detects all Antigravity/Jetski processes and returns candidates sorted by priority."""
+    candidates = []
+
+    def get_priority(cmd: str) -> int:
+        # Prioritize specific CLI instances over the general Hub server
+        if "/cli" in cmd or "cmd/cli" in cmd or "antigravity-cli" in cmd:
+            return 1
+        if "language_server" in cmd:
+            return 2
+        if "jetski-hub-server" in cmd or "antigravity-hub-server" in cmd:
+            return 3
+        return 4
+
     # Try native /proc on Linux for "Standard Library First" compliance
     if os.path.exists("/proc"):
         for pid_dir in os.listdir("/proc"):
@@ -33,10 +45,18 @@ def _find_process() -> Optional[Dict[str, Any]]:
                     cmdline = f.read().replace(b"\x00", b" ").decode("utf-8")
 
                 # Match process name and Antigravity markers
-                if "language_server" in cmdline and (
+                if (
+                    "language_server" in cmdline
+                    or "/cmd/cli/cli" in cmdline
+                    or "jetski-hub-server" in cmdline
+                    or "antigravity-hub-server" in cmdline
+                    or "antigravity-cli" in cmdline
+                    or "antigravity" in cmdline
+                ) and (
                     "--app_data_dir antigravity" in cmdline
                     or "/antigravity/" in cmdline
                     or "--app_data_dir jetski" in cmdline
+                    or "--app_data_dir=jetski" in cmdline
                     or "/jetski/" in cmdline
                 ):
                     csrf_match = re.search(r"--csrf_token\s+([^\s]+)", cmdline)
@@ -45,7 +65,12 @@ def _find_process() -> Optional[Dict[str, Any]]:
                     port_match = re.search(r"--extension_server_port\s+(\d+)", cmdline)
                     port = port_match.group(1) if port_match else None
 
-                    return {"pid": pid_dir, "csrf_token": csrf_token, "port": port}
+                    candidates.append({
+                        "pid": pid_dir,
+                        "csrf_token": csrf_token,
+                        "port": port,
+                        "cmdline": cmdline
+                    })
             except (IOError, OSError, UnicodeDecodeError):
                 continue
 
@@ -56,10 +81,18 @@ def _find_process() -> Optional[Dict[str, Any]]:
         ).decode("utf-8")
 
         for line in output.splitlines():
-            if "language_server" in line and (
+            if (
+                "language_server" in line
+                or "/cmd/cli/cli" in line
+                or "jetski-hub-server" in line
+                or "antigravity-hub-server" in line
+                or "antigravity-cli" in line
+                or "antigravity" in line
+            ) and (
                 "--app_data_dir antigravity" in line
                 or "/antigravity/" in line
                 or "--app_data_dir jetski" in line
+                or "--app_data_dir=jetski" in line
                 or "/jetski/" in line
             ):
                 pid_match = re.search(r"^\s*(\d+)", line)
@@ -73,10 +106,20 @@ def _find_process() -> Optional[Dict[str, Any]]:
                 port_match = re.search(r"--extension_server_port\s+(\d+)", line)
                 port = port_match.group(1) if port_match else None
 
-                return {"pid": pid, "csrf_token": csrf_token, "port": port}
+                # Avoid duplicates if we already scanned via /proc
+                if not any(c["pid"] == pid for c in candidates):
+                    candidates.append({
+                        "pid": pid,
+                        "csrf_token": csrf_token,
+                        "port": port,
+                        "cmdline": line
+                    })
     except (subprocess.SubprocessError, FileNotFoundError):
         pass
-    return None
+
+    # Sort candidates so CLI instances are queried first
+    candidates.sort(key=lambda x: get_priority(x["cmdline"]))
+    return candidates
 
 
 def _find_ports(pid: str) -> List[int]:
@@ -121,8 +164,7 @@ def _probe_connect_port(
     ports: List[int], csrf_token: Optional[str], preferred_port: Optional[str] = None
 ) -> Optional[int]:
     """Probes ports to find the gRPC/Connect API port."""
-    if not csrf_token:
-        return None
+    # csrf_token is now optional as some local server versions do not require it
 
     # Prioritize the preferred port if available
     if preferred_port:
@@ -139,7 +181,7 @@ def _probe_connect_port(
             url,
             data=json.dumps({}).encode("utf-8"),
             headers={
-                "X-Codeium-Csrf-Token": csrf_token,
+                "X-Codeium-Csrf-Token": csrf_token or "",
                 "Connect-Protocol-Version": "1",
                 "Content-Type": "application/json",
             },
@@ -157,145 +199,157 @@ def _probe_connect_port(
 
 
 def get_status() -> Dict[str, Any]:
-    """Fetches and parses the Antigravity quota status."""
-    proc = _find_process()
-    if not proc:
+    """Fetches and parses the Antigravity quota status trying all candidate processes."""
+    candidates = _find_processes()
+    if not candidates:
         return {"running": False}
 
-    pid = proc["pid"]
-    csrf_token = proc["csrf_token"]
-    ext_port = proc["port"]
+    last_running_pid = None
+    last_status_error = False
 
-    ports = _find_ports(pid)
-    connect_port = _probe_connect_port(ports, csrf_token, preferred_port=ext_port)
+    for proc in candidates:
+        pid = proc["pid"]
+        last_running_pid = pid
+        csrf_token = proc["csrf_token"]
+        ext_port = proc["port"]
 
-    if not connect_port:
-        return {"running": True, "connected": False, "pid": pid}
+        ports = _find_ports(pid)
+        connect_port = _probe_connect_port(ports, csrf_token, preferred_port=ext_port)
 
-    status_data = None
+        if not connect_port:
+            continue
 
-    # Primary: GetUserStatus
-    try:
-        url = f"https://127.0.0.1:{connect_port}/exa.language_server_pb.LanguageServerService/GetUserStatus"
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(
+        status_data = None
+
+        # Primary: GetUserStatus
+        try:
+            url = f"https://127.0.0.1:{connect_port}/exa.language_server_pb.LanguageServerService/GetUserStatus"
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(
+                    {
+                        "ideName": "antigravity",
+                        "extensionName": "antigravity",
+                        "locale": "en",
+                        "ideVersion": "unknown",
+                    }
+                ).encode("utf-8"),
+                headers={
+                    "X-Codeium-Csrf-Token": csrf_token or "",
+                    "Connect-Protocol-Version": "1",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, context=SSL_CONTEXT, timeout=2) as response:
+                if response.status == 200:
+                    status_data = json.loads(response.read().decode("utf-8"))
+        except Exception:
+            # Fallback: GetCommandModelConfigs
+            try:
+                url = f"https://127.0.0.1:{connect_port}/exa.language_server_pb.LanguageServerService/GetCommandModelConfigs"
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps({}).encode("utf-8"),
+                    headers={
+                        "X-Codeium-Csrf-Token": csrf_token or "",
+                        "Connect-Protocol-Version": "1",
+                        "Content-Type": "application/json",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(
+                    req, context=SSL_CONTEXT, timeout=2
+                ) as response:
+                    if response.status == 200:
+                        status_data = json.loads(response.read().decode("utf-8"))
+            except Exception:
+                pass
+
+        # Retry over HTTP on preferred port if HTTPS failed
+        if not status_data and ext_port:
+            try:
+                url = f"http://127.0.0.1:{ext_port}/exa.language_server_pb.LanguageServerService/GetUserStatus"
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps({}).encode("utf-8"),
+                    headers={
+                        "X-Codeium-Csrf-Token": csrf_token or "",
+                        "Connect-Protocol-Version": "1",
+                        "Content-Type": "application/json",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=2) as response:
+                    if response.status == 200:
+                        status_data = json.loads(response.read().decode("utf-8"))
+            except Exception:
+                pass
+
+        if not status_data:
+            last_status_error = True
+            continue
+
+        # Parsing and model mapping
+        models = []
+        configs = (
+            status_data.get("userStatus", {})
+            .get("cascadeModelConfigData", {})
+            .get("clientModelConfigs", [])
+        )
+
+        if not configs:
+            configs = status_data.get("clientModelConfigs", [])
+
+        for cfg in configs:
+            model_name = cfg.get("modelName", "unknown")
+            label = cfg.get("label", model_name)
+            quota = cfg.get("quotaInfo", {})
+            remaining = quota.get("remainingFraction", 0.0)
+            reset_time = quota.get("resetTime")
+
+            priority = 99
+            display_label = label
+
+            label_lower = label.lower()
+            for mapping in MODEL_MAPPING:
+                if mapping["pattern"] in label_lower:
+                    if "include" in mapping and mapping["include"] not in label_lower:
+                        continue
+                    if "exclude" in mapping and mapping["exclude"] in label_lower:
+                        continue
+                    priority = mapping["priority"]
+                    display_label = mapping["label"]
+                    break
+
+            models.append(
                 {
-                    "ideName": "antigravity",
-                    "extensionName": "antigravity",
-                    "locale": "en",
-                    "ideVersion": "unknown",
+                    "label": display_label,
+                    "raw_label": label,
+                    "remaining": remaining,
+                    "reset_time": reset_time,
+                    "priority": priority,
                 }
-            ).encode("utf-8"),
-            headers={
-                "X-Codeium-Csrf-Token": csrf_token or "",
-                "Connect-Protocol-Version": "1",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, context=SSL_CONTEXT, timeout=2) as response:
-            if response.status == 200:
-                status_data = json.loads(response.read().decode("utf-8"))
-    except Exception:
-        # Fallback: GetCommandModelConfigs
-        try:
-            url = f"https://127.0.0.1:{connect_port}/exa.language_server_pb.LanguageServerService/GetCommandModelConfigs"
-            req = urllib.request.Request(
-                url,
-                data=json.dumps({}).encode("utf-8"),
-                headers={
-                    "X-Codeium-Csrf-Token": csrf_token or "",
-                    "Connect-Protocol-Version": "1",
-                    "Content-Type": "application/json",
-                },
-                method="POST",
             )
-            with urllib.request.urlopen(
-                req, context=SSL_CONTEXT, timeout=2
-            ) as response:
-                if response.status == 200:
-                    status_data = json.loads(response.read().decode("utf-8"))
-        except Exception:
-            pass
 
-    # Retry over HTTP on extension_server_port if HTTPS failed
-    if not status_data and ext_port:
-        try:
-            url = f"http://127.0.0.1:{ext_port}/exa.language_server_pb.LanguageServerService/GetUserStatus"
-            req = urllib.request.Request(
-                url,
-                data=json.dumps({}).encode("utf-8"),
-                headers={
-                    "X-Codeium-Csrf-Token": csrf_token or "",
-                    "Connect-Protocol-Version": "1",
-                    "Content-Type": "application/json",
-                },
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=2) as response:
-                if response.status == 200:
-                    status_data = json.loads(response.read().decode("utf-8"))
-        except Exception:
-            pass
+        # Sort by priority, then by remaining fraction (lowest first)
+        models.sort(key=lambda x: (x["priority"], x["remaining"]))
 
-    if not status_data:
-        return {"running": True, "connected": True, "pid": pid, "status_error": True}
+        return {
+            "running": True,
+            "connected": True,
+            "pid": pid,
+            "models": models,
+            "email": status_data.get("userStatus", {}).get("accountEmail"),
+            "plan": status_data.get("userStatus", {}).get("planName"),
+        }
 
-    # Parsing and model mapping
-    models = []
-    # Path: userStatus.cascadeModelConfigData.clientModelConfigs[]
-    configs = (
-        status_data.get("userStatus", {})
-        .get("cascadeModelConfigData", {})
-        .get("clientModelConfigs", [])
-    )
-
-    if not configs:
-        # Fallback for GetCommandModelConfigs structure if different
-        configs = status_data.get("clientModelConfigs", [])
-
-    for cfg in configs:
-        model_name = cfg.get("modelName", "unknown")
-        label = cfg.get("label", model_name)
-        quota = cfg.get("quotaInfo", {})
-        remaining = quota.get("remainingFraction", 0.0)
-        reset_time = quota.get("resetTime")
-
-        priority = 99
-        display_label = label
-
-        label_lower = label.lower()
-        for mapping in MODEL_MAPPING:
-            if mapping["pattern"] in label_lower:
-                if "include" in mapping and mapping["include"] not in label_lower:
-                    continue
-                if "exclude" in mapping and mapping["exclude"] in label_lower:
-                    continue
-                priority = mapping["priority"]
-                display_label = mapping["label"]
-                break
-
-        models.append(
-            {
-                "label": display_label,
-                "raw_label": label,
-                "remaining": remaining,
-                "reset_time": reset_time,
-                "priority": priority,
-            }
-        )
-
-    # Sort by priority, then by remaining fraction (lowest first)
-    models.sort(key=lambda x: (x["priority"], x["remaining"]))
-
+    # If we found processes but none could be successfully queried
     return {
         "running": True,
-        "connected": True,
-        "pid": pid,
-        "models": models,
-        "email": status_data.get("userStatus", {}).get("accountEmail"),
-        "plan": status_data.get("userStatus", {}).get("planName"),
+        "connected": False,
+        "pid": last_running_pid,
+        "status_error": last_status_error
     }
 
 
