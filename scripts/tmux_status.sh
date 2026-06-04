@@ -57,20 +57,20 @@ if [[ "$NEEDS_UPDATE" == "true" ]]; then
                 # Redirect stderr to /dev/null to keep tmux status clean
                 # We use a temporary file for atomic updates
                 TEMP_FILE=$(mktemp "${CACHE_FILE}.XXXXXX" 2>/dev/null) || TEMP_FILE="${CACHE_FILE}.$$.tmp"
-                TOTAL_OUTPUT=$(python3 "$PYTHON_SCRIPT" --24h --raw --agy --fast-fail 2>/dev/null)
+                TOTAL_OUTPUT=$(python3 "$PYTHON_SCRIPT" --24h --raw --quota --fast-fail 2>/dev/null)
 
                 if [[ -n "$TOTAL_OUTPUT" ]]; then
-                    # Split into tokens and agy summary
+                    # Split into tokens and quota summary
                     TOTAL_TOKENS=$(echo "$TOTAL_OUTPUT" | cut -d' ' -f1)
-                    AGY_SUMMARY=$(echo "$TOTAL_OUTPUT" | cut -s -d'|' -f2-)
+                    QUOTA_SUMMARY=$(echo "$TOTAL_OUTPUT" | cut -s -d'|' -f2-)
 
                     # Use awk for floating point division and formatting
                     DISPLAY_STR=$(echo "$TOTAL_TOKENS" | awk '{printf "%.1fM", $1/1000000}')
 
                     FINAL_STR="$DISPLAY_STR"
-                    if [[ -n "$AGY_SUMMARY" ]]; then
-                        AGY_SHORT=$(echo "$AGY_SUMMARY" | awk '{print $NF}')
-                        FINAL_STR="${DISPLAY_STR} ${AGY_SHORT}"
+                    if [[ -n "$QUOTA_SUMMARY" ]]; then
+                        QUOTA_SHORT=$(echo "$QUOTA_SUMMARY" | awk '{print $NF}')
+                        FINAL_STR="${DISPLAY_STR} ${QUOTA_SHORT}"
                     fi
 
                     if [[ -n "$TEMP_FILE" ]]; then

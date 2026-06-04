@@ -14,7 +14,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import antigravity_status as antigravity
+quota_provider: Any = None
+try:
+    import quota_provider as q_provider
+    quota_provider = q_provider
+except ImportError:
+    pass
 import token_usage
 
 
@@ -27,7 +32,7 @@ class ViewState:
     col_widths: List[int] = field(default_factory=list)
     totals: token_usage.ModelStats = field(default_factory=token_usage.ModelStats)
     model_totals: Dict[str, token_usage.ModelStats] = field(default_factory=dict)
-    antigravity_status: Dict[str, Any] = field(default_factory=dict)
+    quota_status: Dict[str, Any] = field(default_factory=dict)
 
 
 class UsageTUI:
@@ -46,7 +51,7 @@ class UsageTUI:
         self.stats: Dict[str, Dict[str, Any]] = {}
         self.current_filter = initial_filter
         self.show_models = False
-        self.show_antigravity = False
+        self.show_quota = False
         self.running = True
         self.scroll_y = 0
         self.selected_row = 0
@@ -68,15 +73,15 @@ class UsageTUI:
         self.show_filter_menu = False
         self.menu_selected = self.filter_options.index(self.current_filter)
         self.table_pad: Optional[Any] = None
-        self.antigravity_pad: Optional[Any] = None
+        self.quota_pad: Optional[Any] = None
         self.totals_win: Optional[Any] = None
         self.data_dirty = True
         self.ui_dirty = True
         self.header_dirty = True
 
         # State tracking for optimized redraws
-        self._last_ag_models_len = 0
-        self._last_ag_selected = -1
+        self._last_q_models_len = 0
+        self._last_q_selected = -1
 
         # Threading state
         self.loading = False
@@ -105,15 +110,17 @@ class UsageTUI:
             new_stats = token_usage.aggregate_usage(
                 self.base_dir, force_refresh=force_refresh
             )
-            # Fetch Antigravity status
-            new_antigravity_status = antigravity.get_status()
+            # Fetch Quota status
+            new_quota_status = {}
+            if quota_provider:
+                new_quota_status = quota_provider.get_status()
 
             with self.stats_lock:
                 self.stats = new_stats
 
             # Post-processing to create a new ViewState
             new_view_state = self.calculate_view_state()
-            new_view_state.antigravity_status = new_antigravity_status
+            new_view_state.quota_status = new_quota_status
 
             with self.stats_lock:
                 self.view_state = new_view_state
@@ -238,7 +245,7 @@ class UsageTUI:
         """Updates the current view state (used for filter/model toggles)."""
         new_state = self.calculate_view_state()
         with self.stats_lock:
-            new_state.antigravity_status = self.view_state.antigravity_status
+            new_state.quota_status = self.view_state.quota_status
             self.view_state = new_state
             self.data_dirty = True
             self.ui_dirty = True
@@ -365,31 +372,25 @@ class UsageTUI:
 
         win.refresh()
 
-    def draw_antigravity_view(self, stdscr: Any, y_start: int, y_end: int) -> None:
-        """Draws the dedicated Antigravity status view."""
+    def draw_quota_view(self, stdscr: Any, y_start: int, y_end: int) -> None:
+        """Draws the dedicated Quota status view."""
         h, w = stdscr.getmaxyx()
         with self.stats_lock:
-            status = self.view_state.antigravity_status
+            status = self.view_state.quota_status
 
         if not status:
             stdscr.addstr(y_start, 2, "Status not available yet...")
             return
 
         if not status.get("running"):
-            stdscr.addstr(y_start, 2, "Antigravity language server is not running.")
+            stdscr.addstr(y_start, 2, "Quota provider is not running.")
             return
 
         if not status.get("connected"):
             stdscr.addstr(
                 y_start,
                 2,
-                f"Antigravity (PID: {status.get('pid')}) is running but API is not responding.",
-            )
-            return
-
-        if status.get("status_error"):
-            stdscr.addstr(
-                y_start, 2, "Error fetching quota status from Antigravity API."
+                f"Quota provider (PID: {status.get('pid')}) is running but API is not responding.",
             )
             return
 
@@ -397,7 +398,7 @@ class UsageTUI:
         account = status.get("email", "Unknown Account")
         plan = status.get("plan", "Standard")
         stdscr.attron(curses.A_BOLD)
-        stdscr.addstr(y_start, 2, f"Antigravity Provider: {account} ({plan})")
+        stdscr.addstr(y_start, 2, f"Quota Provider: {account} ({plan})")
         stdscr.attroff(curses.A_BOLD)
 
         # Render Table Header
@@ -411,16 +412,16 @@ class UsageTUI:
 
         # Determine if we need to redraw the pad content
         needs_redraw = (
-            not self.antigravity_pad
-            or self._last_ag_models_len != len(models)
-            or self._last_ag_selected != self.selected_row
+            not self.quota_pad
+            or self._last_q_models_len != len(models)
+            or self._last_q_selected != self.selected_row
         )
 
-        if not self.antigravity_pad:
-            self.antigravity_pad = curses.newpad(max(len(models) + 1, 100), 256)
+        if not self.quota_pad:
+            self.quota_pad = curses.newpad(max(len(models) + 1, 100), 256)
 
         if needs_redraw:
-            self.antigravity_pad.erase()
+            self.quota_pad.erase()
             for i, m in enumerate(models):
                 label = m["label"]
                 rem_pct = m["remaining"] * 100
@@ -436,18 +437,18 @@ class UsageTUI:
                     color = curses.A_BOLD
 
                 if i == self.selected_row:
-                    self.antigravity_pad.attron(curses.A_REVERSE)
+                    self.quota_pad.attron(curses.A_REVERSE)
 
-                self.antigravity_pad.attron(color)
+                self.quota_pad.attron(color)
                 line = f"{label:<25} {rem_pct:>6.1f}% {bar}  {reset}"
-                self.antigravity_pad.addstr(i, 0, line)
-                self.antigravity_pad.attroff(color)
+                self.quota_pad.addstr(i, 0, line)
+                self.quota_pad.attroff(color)
 
                 if i == self.selected_row:
-                    self.antigravity_pad.attroff(curses.A_REVERSE)
+                    self.quota_pad.attroff(curses.A_REVERSE)
 
-            self._last_ag_models_len = len(models)
-            self._last_ag_selected = self.selected_row
+            self._last_q_models_len = len(models)
+            self._last_q_selected = self.selected_row
 
         # Refresh pad on screen
         table_h = y_end - table_y - 2
@@ -456,14 +457,17 @@ class UsageTUI:
             max_scroll = max(0, len(models) - table_h)
             self.scroll_y = min(self.scroll_y, max_scroll)
 
-            self.antigravity_pad.noutrefresh(
+            self.quota_pad.noutrefresh(
                 self.scroll_y, 0, table_y + 2, 2, y_end, w - 1
             )
 
     def draw_footer(self, stdscr: Any) -> None:
         """Draws the bottom command legend."""
         h, w = stdscr.getmaxyx()
-        footer = " [Q] Quit | [R] Refresh | [M] Models | [F] Filter | [P] Pricing | [A] Antigravity | [UP/DOWN] Select "
+        footer = " [Q] Quit | [R] Refresh | [M] Models | [F] Filter | [P] Pricing | "
+        if quota_provider:
+            footer += "[A] Quota | "
+        footer += "[UP/DOWN] Select "
         stdscr.attron(curses.A_REVERSE)
         try:
             stdscr.addstr(h - 1, 0, footer.ljust(w)[: w - 1])
@@ -548,7 +552,7 @@ class UsageTUI:
         elif key in [ord("r"), ord("R")]:
             self.load_data(force_refresh=True)
             self.table_pad = None
-            self.antigravity_pad = None
+            self.quota_pad = None
         elif key in [ord("p"), ord("P")]:
             self.edit_pricing(stdscr)
         elif key in [ord("f"), ord("F")]:
@@ -565,20 +569,21 @@ class UsageTUI:
             self.ui_dirty = True
             self.header_dirty = True
         elif key in [ord("a"), ord("A")]:
-            self.show_antigravity = not self.show_antigravity
-            self.selected_row = 0
-            self.scroll_y = 0
-            self.ui_dirty = True
-            self.antigravity_pad = None
-            self.header_dirty = True
+            if quota_provider:
+                self.show_quota = not self.show_quota
+                self.selected_row = 0
+                self.scroll_y = 0
+                self.ui_dirty = True
+                self.quota_pad = None
+                self.header_dirty = True
         elif key == curses.KEY_UP:
             if self.selected_row > 0:
                 self.selected_row -= 1
                 self.ui_dirty = True
         elif key == curses.KEY_DOWN:
             with self.stats_lock:
-                if self.show_antigravity:
-                    data_len = len(self.view_state.antigravity_status.get("models", []))
+                if self.show_quota:
+                    data_len = len(self.view_state.quota_status.get("models", []))
                 else:
                     data_len = len(self.view_state.view_data)
             if self.selected_row < data_len - 1:
@@ -591,8 +596,8 @@ class UsageTUI:
                 self.ui_dirty = True
         elif key == curses.KEY_NPAGE:
             with self.stats_lock:
-                if self.show_antigravity:
-                    data_len = len(self.view_state.antigravity_status.get("models", []))
+                if self.show_quota:
+                    data_len = len(self.view_state.quota_status.get("models", []))
                 else:
                     data_len = len(self.view_state.view_data)
             new_row = min(data_len - 1, self.selected_row + 10)
@@ -601,7 +606,7 @@ class UsageTUI:
                 self.ui_dirty = True
         elif key == curses.KEY_RESIZE:
             self.table_pad = None
-            self.antigravity_pad = None
+            self.quota_pad = None
             self.totals_win = None
             self.ui_dirty = True
             self.header_dirty = True
@@ -672,8 +677,8 @@ class UsageTUI:
                 self.draw_footer(stdscr)
                 stdscr.noutrefresh()
 
-                if self.show_antigravity:
-                    self.draw_antigravity_view(stdscr, 2, h - 2)
+                if self.show_quota and quota_provider:
+                    self.draw_quota_view(stdscr, 2, h - 2)
                 else:
                     # 2. Draw static table header
                     header_cols = (

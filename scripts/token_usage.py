@@ -14,12 +14,12 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 # Add scripts directory to path to allow importing local modules
 sys.path.append(os.path.dirname(__file__))
 
-# Optional Antigravity status module
-antigravity_status: Any = None
+# Optional quota provider module
+quota_provider: Any = None
 try:
-    import antigravity_status as ag_status
+    import quota_provider as q_provider
 
-    antigravity_status = ag_status
+    quota_provider = q_provider
 except ImportError:
     pass
 
@@ -699,26 +699,26 @@ def filter_stats(
     return filtered
 
 
-def get_antigravity_summary() -> str:
-    """Returns a compact Antigravity status summary."""
-    if not antigravity_status:
+def get_quota_summary() -> str:
+    """Returns a compact Quota status summary."""
+    if not quota_provider:
         return ""
 
     try:
-        status = antigravity_status.get_status()
+        status = quota_provider.get_status()
         if not status or not status.get("running"):
             return ""
 
         if not status.get("connected"):
-            return " | AGY: DISC"
+            return " | QTA: DISC"
 
         models = status.get("models", [])
         if not models:
-            return " | AGY: OK"
+            return " | QTA: OK"
 
         low_model = models[0]
         rem_pct = int(low_model["remaining"] * 100)
-        return f" | AGY: {low_model['label']} {rem_pct}%"
+        return f" | QTA: {low_model['label']} {rem_pct}%"
     except Exception:
         return ""
 
@@ -729,7 +729,7 @@ def print_report(
     today_only: bool = False,
     raw_tokens_only: bool = False,
     show_hours: bool = False,
-    show_antigravity: bool = False,
+    show_quota: bool = False,
 ) -> None:
     """Prints a formatted report of token usage."""
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -745,8 +745,8 @@ def print_report(
 
     if raw_tokens_only:
         output = str(grand_total.total_tokens)
-        if show_antigravity:
-            output += get_antigravity_summary()
+        if show_quota:
+            output += get_quota_summary()
         print(output)
         return
 
@@ -832,10 +832,10 @@ def print_report(
             f"{total_label:<{offset}} {grand_total.total_tokens:>50,} ${grand_total.cost:>8.2f}"
         )
 
-    if show_antigravity:
-        agy_summary = get_antigravity_summary()
-        if agy_summary:
-            print(f"\nAntigravity Status:{agy_summary.replace(' | AGY:', '')}")
+    if show_quota:
+        q_summary = get_quota_summary()
+        if q_summary:
+            print(f"\nQuota Status:{q_summary.replace(' | QTA:', '')}")
 
 
 def print_summary_statistics(
@@ -923,10 +923,13 @@ def main() -> None:
         "--model", action="store_true", help="Show breakdown per model."
     )
     parser.add_argument(
+        "--quota",
+        "--qta",
         "--antigravity",
         "--agy",
         action="store_true",
-        help="Include Antigravity status summary.",
+        dest="quota",
+        help="Include Quota/Antigravity status summary.",
     )
     parser.add_argument(
         "--raw", action="store_true", help="Print only the raw total token count."
@@ -1048,7 +1051,7 @@ def main() -> None:
             today_only=args.today,
             raw_tokens_only=args.raw,
             show_hours=args.hours,
-            show_antigravity=args.antigravity,
+            show_quota=args.quota,
         )
     else:
         if start_date and end_date:
@@ -1060,7 +1063,7 @@ def main() -> None:
             today_only=False,
             raw_tokens_only=args.raw,
             show_hours=args.hours,
-            show_antigravity=args.antigravity,
+            show_quota=args.quota,
         )
 
     if (
