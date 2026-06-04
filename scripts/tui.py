@@ -82,6 +82,7 @@ class UsageTUI:
         # State tracking for optimized redraws
         self._last_q_models_len = 0
         self._last_q_selected = -1
+        self._last_selected_row = -1
 
         # Threading state
         self.loading = False
@@ -721,7 +722,11 @@ class UsageTUI:
                         )
                         self.data_dirty = True
 
-                    if self.data_dirty:
+                    needs_redraw = (
+                        self.data_dirty
+                        or self._last_selected_row != self.selected_row
+                    )
+                    if needs_redraw:
                         self.table_pad.erase()
                         for i, (line, _) in enumerate(state.view_data):
                             if i == self.selected_row:
@@ -730,15 +735,7 @@ class UsageTUI:
                             if i == self.selected_row:
                                 self.table_pad.attroff(curses.A_REVERSE)
                         self.data_dirty = False
-                    else:
-                        # Just update the highlighting if selection changed but data didn't
-                        self.table_pad.erase()
-                        for i, (line, _) in enumerate(state.view_data):
-                            if i == self.selected_row:
-                                self.table_pad.attron(curses.A_REVERSE)
-                            self.table_pad.addstr(i, 0, line)
-                            if i == self.selected_row:
-                                self.table_pad.attroff(curses.A_REVERSE)
+                        self._last_selected_row = self.selected_row
 
                     # 5. Refresh screen
                     stdscr.noutrefresh()
